@@ -1,0 +1,41 @@
+# .gitignore for Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.venv/
+env/
+venv/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.python-version
+
+# .gitignore for Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+vendor/
+*.test
+*.out
+*.mod
+*.sum
+
+# .gitignore for Bash
+*.log
+*.tmp
+
+# .gitignore for VSCode
+.vscode/
+*.code-workspace
+*.history/
+
+# .gitignore for Pluma and Nano
+.*.swp
+*~ 
