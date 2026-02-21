@@ -1,0 +1,13 @@
+[Unit]
+Description=Condottiere Alert Sender (oneshot user service)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/condottiere
+EnvironmentFile=%h/condottiere/.env
+ExecStart=/usr/bin/flock -n /tmp/condottiere-sender.lock %h/.pyenv/versions/condottiere/bin/python scripts/send_alerts.py
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Condottiere FastAPI Web Service (user)
+
+[Service]
+Type=simple
+# If your clone path differs, update WorkingDirectory and EnvironmentFile.
+WorkingDirectory=%h/condottiere
+EnvironmentFile=%h/condottiere/.env
+ExecStart=%h/.pyenv/versions/condottiere/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

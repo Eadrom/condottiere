@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Condottiere sender periodically (user timer)
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=2min
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=condottiere-sender.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Condottiere Notification Poller (oneshot user service)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/condottiere
+EnvironmentFile=%h/condottiere/.env
+ExecStart=/usr/bin/flock -n /tmp/condottiere-poller.lock %h/.pyenv/versions/condottiere/bin/python scripts/poll_notifications.py
+ExecStartPost=-/usr/bin/systemctl --user start condottiere-sender.service
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

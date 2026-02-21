@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Condottiere poller periodically (user timer)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=condottiere-poller.service
+
+[Install]
+WantedBy=timers.target

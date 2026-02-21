@@ -31,6 +31,11 @@ vendor/
 *.log
 *.tmp
 
+# Runtime/local data (auto-created by app/scripts)
+backups/
+*.dump
+*.db
+
 # .gitignore for VSCode
 .vscode/
 *.code-workspace
