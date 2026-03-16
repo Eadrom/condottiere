@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Character
+from app.db.models import Character, EsiState
 from app.security.crypto import encrypt_refresh_token
 
 MONITORING_SCOPE = "esi-characters.read_notifications.v1"
@@ -53,6 +53,7 @@ def upsert_character_from_identity(
         )
         db.add(character)
     else:
+        was_monitoring_enabled = bool(character.monitoring_enabled)
         character.character_name = character_name
         character.corporation_id = corporation_id
         character.scopes = _merge_scopes(character.scopes, scopes)
@@ -60,6 +61,10 @@ def upsert_character_from_identity(
             character.refresh_token_encrypted = encrypt_refresh_token(refresh_token)
         if enable_monitoring:
             character.monitoring_enabled = True
+            if not was_monitoring_enabled:
+                esi_state = db.get(EsiState, character_id)
+                if esi_state is not None:
+                    db.delete(esi_state)
         character.updated_at = now
 
     db.commit()
@@ -77,6 +82,9 @@ def disable_character_monitoring(db: Session, *, character_id: int) -> bool:
     character.monitoring_enabled = False
     character.refresh_token_encrypted = None
     character.scopes = _remove_scope(character.scopes, MONITORING_SCOPE)
+    esi_state = db.get(EsiState, character_id)
+    if esi_state is not None:
+        db.delete(esi_state)
     character.updated_at = now
     db.commit()
     return True

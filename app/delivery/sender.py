@@ -30,7 +30,15 @@ def _format_timestamp(value: object) -> str:
     return str(value or "unknown-time")
 
 
-def _build_event_summary(notification: dict) -> str:
+def _as_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _build_event_summary(notification: dict, name_lookup: dict[int, str] | None = None) -> str:
     notif_type = str(notification.get("type", "MercenaryDenEvent"))
     character_name = str(notification.get("character_name", "Unknown Character"))
     timestamp = _format_timestamp(notification.get("timestamp"))
@@ -42,10 +50,15 @@ def _build_event_summary(notification: dict) -> str:
         f"(notification `{notification_id}`)"
     )
     extra: list[str] = []
-    if details.get("solarsystemID"):
-        extra.append(f"system `{details['solarsystemID']}`")
-    if details.get("planetID"):
-        extra.append(f"planet `{details['planetID']}`")
+    solarsystem_id = _as_positive_int(details.get("solarsystemID"))
+    if solarsystem_id is not None:
+        system_name = (name_lookup or {}).get(solarsystem_id)
+        extra.append(f"system `{system_name or solarsystem_id}`")
+
+    planet_id = _as_positive_int(details.get("planetID"))
+    if planet_id is not None:
+        planet_name = (name_lookup or {}).get(planet_id)
+        extra.append(f"planet `{planet_name or planet_id}`")
 
     aggressor_corp = details.get("aggressorCorporationName")
     if isinstance(aggressor_corp, str):
@@ -60,25 +73,35 @@ def _build_event_summary(notification: dict) -> str:
     return summary
 
 
-def build_discord_payload(notification: dict, mention_text: str | None) -> dict:
+def build_discord_payload(
+    notification: dict,
+    mention_text: str | None,
+    *,
+    name_lookup: dict[int, str] | None = None,
+) -> dict:
     """Build a concise Discord content payload for one event."""
     parts = []
     if mention_text:
         parts.append(mention_text.strip())
-    parts.append(_build_event_summary(notification))
+    parts.append(_build_event_summary(notification, name_lookup=name_lookup))
     content = "\n".join(part for part in parts if part).strip()
     if len(content) > 1900:
         content = f"{content[:1897]}..."
     return {"content": content}
 
 
-def build_eve_mail_content(notification: dict, subject_prefix: str) -> tuple[str, str]:
+def build_eve_mail_content(
+    notification: dict,
+    subject_prefix: str,
+    *,
+    name_lookup: dict[int, str] | None = None,
+) -> tuple[str, str]:
     """Build (subject, body) for EVE in-game mail fallback."""
     notif_type = str(notification.get("type", "MercenaryDenEvent"))
     character_name = str(notification.get("character_name", "Unknown Character"))
     timestamp = _format_timestamp(notification.get("timestamp"))
     notification_id = notification.get("notification_id")
-    summary = _build_event_summary(notification)
+    summary = _build_event_summary(notification, name_lookup=name_lookup)
 
     subject = f"{subject_prefix}: {notif_type}"
     body_lines = [

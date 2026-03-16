@@ -19,7 +19,8 @@ from app.delivery.sender import (
     build_eve_mail_content,
     post_webhook_detailed,
 )
-from app.esi.client import refresh_access_token, send_mail
+from app.esi.client import refresh_access_token, resolve_universe_names, send_mail
+from app.notifications.parsing import parse_notification_text
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.services.backoff import compute_backoff_seconds
 
@@ -42,6 +43,20 @@ def _notification_context(notification: Notification, character: Character) -> d
         "timestamp": notification.timestamp,
         "raw_text": notification.raw_text,
     }
+
+
+def _extract_name_lookup_ids(notification: Notification) -> set[int]:
+    details = parse_notification_text(notification.raw_text or "")
+    ids: set[int] = set()
+    for key in ("solarsystemID", "planetID"):
+        value = details.get(key)
+        try:
+            entity_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if entity_id > 0:
+            ids.add(entity_id)
+    return ids
 
 
 def _mark_sent(delivery: Delivery, now: datetime) -> None:
@@ -112,6 +127,7 @@ def _send_eve_mail_fallback(
     character: Character,
     notification: Notification,
     token_cache: dict[int, str],
+    name_lookup: dict[int, str] | None = None,
 ) -> tuple[bool, str | None]:
     scopes = _parse_scopes(character.scopes)
     if MAIL_SEND_SCOPE not in scopes:
@@ -126,7 +142,11 @@ def _send_eve_mail_fallback(
 
     settings = get_settings()
     alert_data = _notification_context(notification, character)
-    subject, body = build_eve_mail_content(alert_data, settings.eve_mail_subject_prefix)
+    subject, body = build_eve_mail_content(
+        alert_data,
+        settings.eve_mail_subject_prefix,
+        name_lookup=name_lookup,
+    )
 
     try:
         send_mail(
@@ -173,6 +193,18 @@ def run_sender_once() -> None:
         mail_sent = 0
         token_cache: dict[int, str] = {}
         last_discord_send_at: dict[str, float] = {}
+        universe_name_lookup: dict[int, str] = {}
+
+        lookup_ids: set[int] = set()
+        for _, notification, _ in rows:
+            lookup_ids.update(_extract_name_lookup_ids(notification))
+
+        if lookup_ids:
+            try:
+                universe_name_lookup = resolve_universe_names(list(lookup_ids))
+            except httpx.HTTPError as exc:
+                print("sender", f"universe-names-error={exc}")
+                universe_name_lookup = {}
 
         for delivery, notification, character in rows:
             processed += 1
@@ -200,6 +232,7 @@ def run_sender_once() -> None:
                 payload = build_discord_payload(
                     _notification_context(notification, character),
                     mention_text=destination.mention_text,
+                    name_lookup=universe_name_lookup,
                 )
                 result = post_webhook_detailed(destination.webhook_url, payload)
                 if result.ok:
@@ -252,6 +285,7 @@ def run_sender_once() -> None:
                         character=character,
                         notification=notification,
                         token_cache=token_cache,
+                        name_lookup=universe_name_lookup,
                     )
                     if ok:
                         _mark_sent(delivery, now)

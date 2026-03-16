@@ -124,3 +124,51 @@ def send_mail(
         response = client.post(url, headers=headers, params=params, json=payload)
     response.raise_for_status()
     return int(response.json())
+
+
+def resolve_universe_names(entity_ids: list[int]) -> dict[int, str]:
+    """Resolve universe IDs (e.g. solar systems, planets) to names."""
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for value in entity_ids:
+        try:
+            entity_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if entity_id <= 0 or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        unique_ids.append(entity_id)
+
+    if not unique_ids:
+        return {}
+
+    settings = get_settings()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": settings.eve_user_agent,
+    }
+    params = {"datasource": settings.eve_esi_datasource}
+    url = f"{settings.eve_esi_base_url.rstrip('/')}/universe/names/"
+
+    with httpx.Client(timeout=20.0) as client:
+        response = client.post(url, headers=headers, params=params, json=unique_ids)
+    response.raise_for_status()
+
+    payload = response.json()
+    if not isinstance(payload, list):
+        return {}
+
+    names: dict[int, str] = {}
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        try:
+            entity_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        names[entity_id] = name
+    return names
