@@ -28,6 +28,7 @@ Create the service user:
 ```bash
 sudo adduser --disabled-password --gecos "" condottiere
 sudo loginctl enable-linger condottiere
+sudo systemctl start user@$(id -u condottiere).service
 ```
 
 ## 2. Admin Session: PostgreSQL
@@ -112,7 +113,7 @@ Run migrations / upgrade:
 python scripts/update_software.py
 ```
 
-Install/enable user-scope systemd units:
+Install user-scope systemd unit symlinks:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -121,9 +122,14 @@ ln -sf ~/condottiere/systemd/user/condottiere-poller.service ~/.config/systemd/u
 ln -sf ~/condottiere/systemd/user/condottiere-poller.timer ~/.config/systemd/user/condottiere-poller.timer
 ln -sf ~/condottiere/systemd/user/condottiere-sender.service ~/.config/systemd/user/condottiere-sender.service
 ln -sf ~/condottiere/systemd/user/condottiere-sender.timer ~/.config/systemd/user/condottiere-sender.timer
-systemctl --user daemon-reload
-systemctl --user enable --now condottiere-web.service condottiere-poller.timer condottiere-sender.timer
 exit
+```
+
+Back in admin shell, load and enable units through the `condottiere` user manager:
+
+```bash
+sudo systemctl --user -M condottiere@ daemon-reload
+sudo systemctl --user -M condottiere@ enable --now condottiere-web.service condottiere-poller.timer condottiere-sender.timer
 ```
 
 ## 4. Admin Session: nginx + TLS
@@ -151,11 +157,9 @@ sudo certbot --nginx -d YOUR_DOMAIN --redirect
 ## 5. Verify
 
 ```bash
-sudo -iu condottiere
 curl -sS http://127.0.0.1:8000/status/health
-systemctl --user status condottiere-web.service --no-pager
-systemctl --user status condottiere-poller.timer condottiere-sender.timer --no-pager
-exit
+sudo systemctl --user -M condottiere@ status condottiere-web.service --no-pager
+sudo systemctl --user -M condottiere@ status condottiere-poller.timer condottiere-sender.timer --no-pager
 ```
 
 Expected:
@@ -165,7 +169,7 @@ Expected:
 
 ## Update Process
 
-Run as service user:
+Run update as service user, then restart web from admin shell:
 
 ```bash
 sudo -iu condottiere
@@ -173,6 +177,6 @@ cd ~/condottiere
 git pull
 pip install -e ".[prod]"
 python scripts/update_software.py
-systemctl --user restart condottiere-web.service
 exit
+sudo systemctl --user -M condottiere@ restart condottiere-web.service
 ```

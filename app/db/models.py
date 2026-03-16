@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -11,9 +11,9 @@ from app.db.base import Base
 class Character(Base):
     __tablename__ = "characters"
 
-    character_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    character_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     character_name: Mapped[str] = mapped_column(String(255))
-    corporation_id: Mapped[int] = mapped_column(Integer)
+    corporation_id: Mapped[int] = mapped_column(BigInteger)
     refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     scopes: Mapped[str] = mapped_column(Text, default="")
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -28,11 +28,11 @@ class Character(Base):
 class CorpSetting(Base):
     __tablename__ = "corp_settings"
 
-    corporation_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    corporation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     webhook_url: Mapped[str] = mapped_column(Text)
     mention_text: Mapped[str] = mapped_column(String(255), default="")
     allowed_roles: Mapped[str] = mapped_column(Text, default='["Director"]')
-    updated_by_character_id: Mapped[int] = mapped_column(Integer)
+    updated_by_character_id: Mapped[int] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 
 
@@ -47,8 +47,8 @@ class Notification(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    character_id: Mapped[int] = mapped_column(Integer)
-    notification_id: Mapped[int] = mapped_column(Integer)
+    character_id: Mapped[int] = mapped_column(BigInteger)
+    notification_id: Mapped[int] = mapped_column(BigInteger)
     type: Mapped[str] = mapped_column(String(128))
     timestamp: Mapped[datetime] = mapped_column(DateTime)
     raw_text: Mapped[str] = mapped_column(Text)
@@ -66,8 +66,8 @@ class Delivery(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    character_id: Mapped[int] = mapped_column(Integer)
-    notification_id: Mapped[int] = mapped_column(Integer)
+    character_id: Mapped[int] = mapped_column(BigInteger)
+    notification_id: Mapped[int] = mapped_column(BigInteger)
     destination_key: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -80,7 +80,7 @@ class Delivery(Base):
 class EsiState(Base):
     __tablename__ = "esi_state"
 
-    character_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    character_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     notif_etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notif_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
