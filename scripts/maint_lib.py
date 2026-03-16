@@ -117,6 +117,13 @@ def _sqlite_backup_path(url: URL) -> Path:
     return db_path
 
 
+def _postgres_backup_dsn(url: URL) -> str:
+    """Convert SQLAlchemy URL to libpq-compatible DSN/URL for pg_dump."""
+    base_driver = url.drivername.split("+", 1)[0]
+    normalized = url.set(drivername=base_driver)
+    return normalized.render_as_string(hide_password=False)
+
+
 def run_backup(output_dir: Path | None = None) -> dict[str, Any]:
     """Create a DB backup appropriate for current backend."""
     output_dir = output_dir or DEFAULT_BACKUP_DIR
@@ -139,11 +146,12 @@ def run_backup(output_dir: Path | None = None) -> dict[str, Any]:
 
     if url.get_backend_name().startswith("postgresql"):
         target = output_dir / f"condottiere-postgres-{stamp}.dump"
+        dbname = _postgres_backup_dsn(url)
         cmd = [
             "pg_dump",
             "--format=custom",
             f"--file={target}",
-            _db_url(),
+            f"--dbname={dbname}",
         ]
         completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if completed.returncode != 0:
