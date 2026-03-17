@@ -13,13 +13,18 @@ from app.auth.scopes import MAIL_SEND_SCOPE
 from app.config import get_settings
 from app.db.models import Character, Delivery, Notification
 from app.db.session import SessionLocal
-from app.delivery.resolver import resolve_destination
+from app.delivery.resolver import resolve_destination_with_debug
 from app.delivery.sender import (
     build_discord_payload,
     build_eve_mail_content,
     post_webhook_detailed,
 )
-from app.esi.client import refresh_access_token, resolve_universe_names, send_mail
+from app.esi.client import (
+    refresh_access_token,
+    resolve_planet_names,
+    resolve_universe_names,
+    send_mail,
+)
 from app.notifications.parsing import parse_notification_text
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.services.backoff import compute_backoff_seconds
@@ -45,18 +50,26 @@ def _notification_context(notification: Notification, character: Character) -> d
     }
 
 
-def _extract_name_lookup_ids(notification: Notification) -> set[int]:
+def _extract_name_lookup_ids(notification: Notification) -> tuple[set[int], set[int]]:
     details = parse_notification_text(notification.raw_text or "")
-    ids: set[int] = set()
-    for key in ("solarsystemID", "planetID"):
-        value = details.get(key)
-        try:
-            entity_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if entity_id > 0:
-            ids.add(entity_id)
-    return ids
+    system_ids: set[int] = set()
+    planet_ids: set[int] = set()
+
+    try:
+        system_id = int(details.get("solarsystemID"))
+    except (TypeError, ValueError):
+        system_id = 0
+    if system_id > 0:
+        system_ids.add(system_id)
+
+    try:
+        planet_id = int(details.get("planetID"))
+    except (TypeError, ValueError):
+        planet_id = 0
+    if planet_id > 0:
+        planet_ids.add(planet_id)
+
+    return system_ids, planet_ids
 
 
 def _mark_sent(delivery: Delivery, now: datetime) -> None:
@@ -195,21 +208,28 @@ def run_sender_once() -> None:
         last_discord_send_at: dict[str, float] = {}
         universe_name_lookup: dict[int, str] = {}
 
-        lookup_ids: set[int] = set()
+        system_ids: set[int] = set()
+        planet_ids: set[int] = set()
         for _, notification, _ in rows:
-            lookup_ids.update(_extract_name_lookup_ids(notification))
+            notif_system_ids, notif_planet_ids = _extract_name_lookup_ids(notification)
+            system_ids.update(notif_system_ids)
+            planet_ids.update(notif_planet_ids)
 
-        if lookup_ids:
+        if system_ids:
             try:
-                universe_name_lookup = resolve_universe_names(list(lookup_ids))
+                universe_name_lookup.update(resolve_universe_names(list(system_ids)))
             except httpx.HTTPError as exc:
-                print("sender", f"universe-names-error={exc}")
-                universe_name_lookup = {}
+                print("sender", f"universe-system-names-error={exc}")
+        if planet_ids:
+            try:
+                universe_name_lookup.update(resolve_planet_names(list(planet_ids)))
+            except httpx.HTTPError as exc:
+                print("sender", f"universe-planet-names-error={exc}")
 
         for delivery, notification, character in rows:
             processed += 1
             now = datetime.now(UTC).replace(tzinfo=None)
-            destination = resolve_destination(
+            destination, destination_debug = resolve_destination_with_debug(
                 db,
                 character=character,
                 default_mention=settings.discord_default_mention,
@@ -219,6 +239,18 @@ def run_sender_once() -> None:
                     else None
                 ),
             )
+            if destination is None:
+                print(
+                    "sender",
+                    f"delivery={delivery.id}",
+                    f"character={character.character_id}",
+                    "destination=none",
+                    f"use_corp={destination_debug.get('use_corp_webhook')}",
+                    f"has_personal={destination_debug.get('has_personal_webhook')}",
+                    f"has_corp_setting={destination_debug.get('has_corp_setting')}",
+                    f"has_corp_webhook={destination_debug.get('has_corp_webhook')}",
+                    f"has_dev_webhook={destination_debug.get('has_dev_webhook')}",
+                )
 
             if destination and destination.destination_type == "discord" and destination.webhook_url:
                 min_gap = max(settings.discord_min_seconds_per_destination, 0.0)

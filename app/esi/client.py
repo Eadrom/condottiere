@@ -172,3 +172,50 @@ def resolve_universe_names(entity_ids: list[int]) -> dict[int, str]:
             continue
         names[entity_id] = name
     return names
+
+
+def resolve_planet_names(planet_ids: list[int]) -> dict[int, str]:
+    """Resolve planet IDs to names via per-planet endpoint."""
+    settings = get_settings()
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for value in planet_ids:
+        try:
+            planet_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if planet_id <= 0 or planet_id in seen:
+            continue
+        seen.add(planet_id)
+        unique_ids.append(planet_id)
+
+    if not unique_ids:
+        return {}
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": settings.eve_user_agent,
+    }
+    params = {"datasource": settings.eve_esi_datasource}
+    base = settings.eve_esi_base_url.rstrip("/")
+
+    names: dict[int, str] = {}
+    with httpx.Client(timeout=20.0) as client:
+        for planet_id in unique_ids:
+            response = client.get(
+                f"{base}/universe/planets/{planet_id}/",
+                headers=headers,
+                params=params,
+            )
+            # Planet lookup is best-effort. Some IDs may not resolve in ESI.
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                continue
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                continue
+            names[planet_id] = name
+    return names
