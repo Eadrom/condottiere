@@ -866,8 +866,6 @@ def _render_alerts_page(
         selected_mode = "corp_webhook"
     elif character_row.personal_webhook_url:
         selected_mode = "personal_webhook"
-    elif corp_exists:
-        selected_mode = "corp_webhook"
     else:
         selected_mode = "eve_mail"
 

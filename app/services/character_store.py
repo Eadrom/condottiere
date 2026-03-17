@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Character, EsiState
+from app.db.models import Character, CorpSetting, EsiState
 from app.security.crypto import encrypt_refresh_token
 
 MONITORING_SCOPE = "esi-characters.read_notifications.v1"
@@ -37,6 +37,7 @@ def upsert_character_from_identity(
     character = db.get(Character, character_id)
     if character is None:
         encrypted_refresh = encrypt_refresh_token(refresh_token) if refresh_token else None
+        corp_setting = db.get(CorpSetting, corporation_id)
         character = Character(
             character_id=character_id,
             character_name=character_name,
@@ -46,7 +47,8 @@ def upsert_character_from_identity(
             monitoring_enabled=enable_monitoring,
             personal_webhook_url=None,
             personal_mention_text="",
-            use_corp_webhook=False,
+            # New users default to corp webhook when their corp already configured one.
+            use_corp_webhook=corp_setting is not None,
             is_active=True,
             created_at=now,
             updated_at=now,
