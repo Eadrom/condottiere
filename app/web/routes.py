@@ -222,6 +222,11 @@ def _render_home(
                 "Enable Monitoring"
                 "</a>"
             )
+            secondary_action = """
+            <div class="secondary-action">
+              <a class="delivery-link" href="/alerts">Configure Alert Delivery</a>
+            </div>
+            """
     else:
         description_html = (
             "Mercenary Den monitoring and alerting for EVE Online.<br />"
@@ -320,6 +325,23 @@ def _render_home(
       color: var(--muted);
       font-size: 0.9rem;
       letter-spacing: 0.04em;
+    }}
+    .footer-links {{
+      margin-bottom: 6px;
+      font-size: 0.88rem;
+      letter-spacing: 0.02em;
+    }}
+    .footer-links a {{
+      color: #d2dcff;
+      text-decoration: none;
+      border: 1px solid #3a4f9a;
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(20, 34, 76, 0.45);
+    }}
+    .footer-links a:hover {{
+      background: #1a2750;
+      color: #ffffff;
     }}
     .user-chip {{
       position: fixed;
@@ -728,7 +750,12 @@ def _render_home(
       {telemetry_prompt_block}
     </section>
   </main>
-  <div class="footer">Made by Eadrom Vintarus</div>
+  <div class="footer">
+    <div class="footer-links">
+      <a href="/how-it-works">How Condottiere Works</a>
+    </div>
+    <div>Made by Eadrom Vintarus</div>
+  </div>
 </body>
 </html>
 """
@@ -770,6 +797,316 @@ def home(request: Request) -> HTMLResponse:
             delivery_snapshot=delivery_snapshot,
             csrf_token=csrf_token,
             telemetry_prompt=telemetry_prompt,
+        )
+    )
+
+
+def _render_how_it_works(character: dict | None, csrf_token: str) -> str:
+    user_block = _render_user_chip(character, csrf_token=csrf_token)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>How Condottiere Works</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #000000;
+      --fg: #f5f5f5;
+      --muted: #b4b4b4;
+      --accent: #2460ff;
+      --accent-hover: #1549d6;
+      --panel: #121212;
+      --panel-border: #2b2b2b;
+      --ok: #8ef5b6;
+      --warn: #ffd56a;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top, #121212, var(--bg) 55%);
+      color: var(--fg);
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      padding: 28px;
+    }}
+    .wrap {{
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 8px 8px 36px;
+    }}
+    h1 {{
+      margin: 0 0 12px;
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    .intro {{
+      margin: 0 0 18px;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .panel {{
+      margin-top: 14px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 14px;
+    }}
+    .panel h2 {{
+      margin: 0 0 10px;
+      font-size: 1.03rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }}
+    ul {{
+      margin: 0;
+      padding-left: 20px;
+      color: #d8d8d8;
+      line-height: 1.52;
+    }}
+    li + li {{
+      margin-top: 6px;
+    }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #0c0c0c;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      padding: 1px 5px;
+      color: #f2f2f2;
+    }}
+    .note {{
+      margin-top: 12px;
+      border: 1px solid #8d6b2f;
+      background: #2b230f;
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: #ffe3a6;
+      line-height: 1.45;
+    }}
+    .pill {{
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      margin-left: 6px;
+      vertical-align: middle;
+    }}
+    .pill-ok {{
+      color: #101010;
+      background: var(--ok);
+      border: 1px solid #4ca870;
+    }}
+    .pill-warn {{
+      color: #111111;
+      background: var(--warn);
+      border: 1px solid #cfaa48;
+    }}
+    .actions {{
+      margin-top: 18px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .actions a {{
+      text-decoration: none;
+      color: #d2dcff;
+      border: 1px solid #3a4f9a;
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 0.9rem;
+      background: rgba(20, 34, 76, 0.45);
+    }}
+    .actions a:hover {{
+      background: #1a2750;
+      color: #ffffff;
+    }}
+    .footer {{
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      letter-spacing: 0.02em;
+    }}
+    .user-chip {{
+      position: fixed;
+      top: 18px;
+      right: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: rgba(22, 22, 22, 0.95);
+      border: 1px solid #2e2e2e;
+      border-radius: 12px;
+      backdrop-filter: blur(2px);
+      z-index: 10;
+    }}
+    .user-chip img {{
+      width: 52px;
+      height: 52px;
+      border-radius: 10px;
+      border: 1px solid #3a3a3a;
+      object-fit: cover;
+    }}
+    .user-chip .label {{
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-bottom: 2px;
+    }}
+    .user-chip .name {{
+      font-weight: 700;
+      font-size: 0.94rem;
+      margin-bottom: 4px;
+    }}
+    .user-chip .chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 4px;
+    }}
+    .user-chip .chip-row-admin {{
+      margin-top: 6px;
+    }}
+    .user-chip .chip-row > * {{
+      margin: 0;
+      vertical-align: middle;
+    }}
+    .user-chip .monitoring-badge,
+    .user-chip .admin-badge,
+    .user-chip .admin-link,
+    .user-chip .logout-link,
+    .user-chip .deauth-button {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      text-decoration: none;
+      justify-content: center;
+      min-height: 24px;
+    }}
+    .user-chip .monitoring-badge {{
+      color: #101010;
+      background: #8ef5b6;
+      border: 1px solid #4ca870;
+      font-weight: 700;
+    }}
+    .user-chip .monitoring-badge.off {{
+      color: #ffffff;
+      background: #8d2f2f;
+      border: 1px solid #8d2f2f;
+    }}
+    .user-chip .admin-badge {{
+      color: #111111;
+      background: #ffd56a;
+      border: 1px solid #cfaa48;
+      font-weight: 700;
+    }}
+    .user-chip .admin-link {{
+      color: #b2ffc9;
+      border: 1px solid #2a8254;
+    }}
+    .user-chip .admin-link:hover {{
+      background: #1f4d35;
+      color: #ffffff;
+    }}
+    .user-chip .logout-link {{
+      color: #d2dcff;
+      border: 1px solid #3a4f9a;
+    }}
+    .user-chip .logout-link:hover {{
+      background: #1a2750;
+      color: #ffffff;
+    }}
+    .user-chip .deauth-form {{
+      display: inline-flex;
+      align-items: center;
+      margin: 0;
+      line-height: 1;
+    }}
+    .user-chip .deauth-button {{
+      border: 1px solid #8a3131;
+      background: #391414;
+      color: #ffe0e0;
+      cursor: pointer;
+    }}
+    .user-chip .deauth-button:hover {{
+      background: #5b1f1f;
+      color: #ffffff;
+    }}
+  </style>
+</head>
+<body>
+  {user_block}
+  <div class="wrap">
+    <h1>How Condottiere Works</h1>
+    <p class="intro">
+      Condottiere monitors EVE character notifications for Mercenary Den events and sends alerts to
+      Discord (or EVE mail fallback). This page explains timing and API constraints so expectations are clear.
+    </p>
+
+    <div class="panel">
+      <h2>Mercenary Den Mechanics</h2>
+      <ul>
+        <li>Attack notification is generated when the den drops below approximately <code>95% shield</code>.</li>
+        <li>A den enters reinforcement at approximately <code>25% shield</code>.</li>
+        <li>The reinforcement notification includes the game-supplied <code>timestampExited</code> value.</li>
+        <li>Operationally, repeated attack alerts for the same den may be delayed by game-side cooldown behavior.</li>
+      </ul>
+    </div>
+
+    <div class="panel">
+      <h2>Polling and Cache Behavior <span class="pill pill-ok">API-Limited</span></h2>
+      <ul>
+        <li>Poller schedule runs every minute, but calls are cache-aware using <code>ETag</code> and <code>Expires</code>.</li>
+        <li>EVE notifications endpoint is cached for about <code>10 minutes</code>.</li>
+        <li>Expected detection lag is usually between <code>~1 and ~11 minutes</code> after EVE publishes the notification.</li>
+        <li>If EVE has not yet published a notification, Condottiere has nothing to ingest and cannot alert earlier.</li>
+      </ul>
+    </div>
+
+    <div class="panel">
+      <h2>Reaction-Time Rule of Thumb <span class="pill pill-warn">Estimate</span></h2>
+      <ul>
+        <li>With <code>500k shield HP</code> and <code>25% shield resist</code>, a practical worst-case threshold is roughly <code>757 DPS</code>.</li>
+        <li>Above that, reinforcement can happen before an alert is observed during worst-case cache timing.</li>
+        <li>Below that, you are more likely to receive warning in time to react.</li>
+      </ul>
+      <div class="note">
+        These are operational estimates for expectation-setting, not guarantees. Real outcomes depend on
+        game timing, server cache state, target profile, and attacker DPS.
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Delivery Modes</h2>
+      <ul>
+        <li>Primary: Discord webhook (personal or corporation, depending on your settings).</li>
+        <li>Fallback: EVE in-game mail when no Discord destination is selected.</li>
+      </ul>
+    </div>
+
+    <div class="actions">
+      <a href="/">Back to Home</a>
+    </div>
+    <div class="footer">Made by Eadrom Vintarus</div>
+  </div>
+</body>
+</html>
+"""
+
+
+@router.get("/how-it-works", response_class=HTMLResponse)
+def how_it_works(request: Request) -> HTMLResponse:
+    return HTMLResponse(
+        content=_render_how_it_works(
+            request.session.get("character"),
+            csrf_token=_csrf_token_for_request(request),
         )
     )
 
