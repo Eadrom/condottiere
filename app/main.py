@@ -1,6 +1,10 @@
 """FastAPI entrypoint."""
 
+from typing import Awaitable, Callable
+
 from fastapi import FastAPI
+from fastapi import Request
+from fastapi import Response
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.routes_auth import router as auth_router
@@ -23,6 +27,46 @@ app.add_middleware(
     same_site="lax",
     https_only=settings.env.lower() == "prod",
 )
+
+
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "img-src 'self' https://images.evetech.net data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'self'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+_PERMISSIONS_POLICY = (
+    "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+    "magnetometer=(), microphone=(), payment=(), usb=()"
+)
+
+
+@app.middleware("http")
+async def security_headers_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    response = await call_next(request)
+
+    # Safe browser defaults for clickjacking/MIME sniffing/privacy controls.
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", _PERMISSIONS_POLICY)
+    response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
+
+    # HSTS should only be emitted for HTTPS responses.
+    if request.url.scheme == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
 
 
 @app.on_event("startup")
