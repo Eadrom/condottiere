@@ -10,10 +10,18 @@ from app.db.base import Base
 _settings = get_settings()
 
 _connect_args = {}
+_engine_kwargs = {"future": True}
 if _settings.database_url.startswith("sqlite"):
     _connect_args = {"check_same_thread": False}
+else:
+    # Recover cleanly from restarted/terminated Postgres connections.
+    _engine_kwargs["pool_pre_ping"] = True
 
-engine = create_engine(_settings.database_url, future=True, connect_args=_connect_args)
+engine = create_engine(
+    _settings.database_url,
+    connect_args=_connect_args,
+    **_engine_kwargs,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

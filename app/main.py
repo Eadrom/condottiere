@@ -17,8 +17,13 @@ from app.telemetry.events import ensure_local_install_id
 from app.web.routes import router as web_router
 
 
-app = FastAPI(title="Condottiere")
 settings = get_settings()
+app = FastAPI(
+    title="Condottiere",
+    openapi_url=None if settings.env.lower() == "prod" else "/openapi.json",
+    docs_url=None if settings.env.lower() == "prod" else "/docs",
+    redoc_url=None if settings.env.lower() == "prod" else "/redoc",
+)
 
 # Session cookie storage for OAuth state and logged-in character identity.
 app.add_middleware(
