@@ -136,13 +136,32 @@ sudo systemctl --user -M condottiere@ enable --now condottiere-web.service condo
 
 Back in admin shell.
 
-Edit server name first:
-- update `server_name` in `/home/condottiere/condottiere/deploy/nginx/condottiere.conf`
+Important:
+- `deploy/nginx/condottiere.conf.example` is tracked in git
+- create a local `deploy/nginx/condottiere.conf` from that example
+- do not symlink the repo file directly into `/etc/nginx`
+- certbot will edit the live nginx file, and that should not create git conflicts in the app checkout
 
-Enable the site (direct symlink is fine):
+Create your local nginx config from the example:
 
 ```bash
-sudo ln -sf /home/condottiere/condottiere/deploy/nginx/condottiere.conf /etc/nginx/sites-enabled/condottiere
+cp /home/condottiere/condottiere/deploy/nginx/condottiere.conf.example /home/condottiere/condottiere/deploy/nginx/condottiere.conf
+editor /home/condottiere/condottiere/deploy/nginx/condottiere.conf
+```
+
+At minimum, update:
+- `server_name`
+
+Then copy that local file into nginx:
+
+```bash
+sudo cp /home/condottiere/condottiere/deploy/nginx/condottiere.conf /etc/nginx/sites-available/condottiere
+```
+
+Enable the site:
+
+```bash
+sudo ln -sf /etc/nginx/sites-available/condottiere /etc/nginx/sites-enabled/condottiere
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
@@ -152,6 +171,16 @@ TLS with Let’s Encrypt:
 
 ```bash
 sudo certbot --nginx -d YOUR_DOMAIN --redirect
+```
+
+After certbot:
+- it is expected that `/etc/nginx/sites-available/condottiere` will now differ from the repo template
+- leave `deploy/nginx/condottiere.conf.example` unchanged
+- your local `deploy/nginx/condottiere.conf` is not tracked by git
+- if upstream nginx template changes later, compare manually:
+
+```bash
+diff -u /home/condottiere/condottiere/deploy/nginx/condottiere.conf.example /etc/nginx/sites-available/condottiere
 ```
 
 ## 5. Verify

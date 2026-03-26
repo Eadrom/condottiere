@@ -35,6 +35,7 @@ vendor/
 backups/
 *.dump
 *.db
+deploy/nginx/condottiere.conf
 
 # .gitignore for VSCode
 .vscode/

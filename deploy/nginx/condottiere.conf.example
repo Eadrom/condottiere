@@ -1,6 +1,7 @@
 # Condottiere nginx site config (production template).
-# Bootstraps HTTP reverse proxy so certbot can issue certs.
-# After this file is enabled and nginx is reloaded, run:
+# Copy to deploy/nginx/condottiere.conf, edit server_name, then copy that file
+# into /etc/nginx/sites-available/condottiere before enabling the site.
+# After the live /etc file is enabled and nginx is reloaded, run:
 #   sudo certbot --nginx -d condottiere.example.com --redirect
 
 server {
