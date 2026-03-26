@@ -1875,6 +1875,7 @@ def _render_admin(
         monitoring_enabled = bool(row.monitoring_enabled)
         has_refresh_token = bool(row.refresh_token_encrypted)
         has_etag = bool(esi_state and esi_state.notif_etag)
+        monitoring_enabled_at = _fmt_datetime(row.monitoring_enabled_at)
         last_polled_at = _fmt_datetime(esi_state.last_polled_at if esi_state else None)
         notif_expires_at = _fmt_datetime(esi_state.notif_expires_at if esi_state else None)
         last_error = escape(esi_state.last_error) if esi_state and esi_state.last_error else "-"
@@ -1897,6 +1898,7 @@ def _render_admin(
               <td>{_yn(has_etag)}</td>
               <td>{_yn(bool(row.personal_webhook_url))}</td>
               <td>{_yn(bool(row.use_corp_webhook))}</td>
+              <td>{monitoring_enabled_at}</td>
               <td>{_fmt_datetime(row.updated_at)}</td>
               <td>{last_polled_at}</td>
               <td>{notif_expires_at}</td>
@@ -1905,7 +1907,7 @@ def _render_admin(
             """
         )
 
-    table_body = "".join(rows) if rows else '<tr><td colspan="14">No registered characters yet.</td></tr>'
+    table_body = "".join(rows) if rows else '<tr><td colspan="15">No registered characters yet.</td></tr>'
     total = len(characters)
     active_count = sum(1 for row in characters if row.is_active)
     telemetry_html = ""
@@ -2314,6 +2316,7 @@ def _render_admin(
             <th>Has ETag</th>
             <th>Personal Webhook</th>
             <th>Use Corp Webhook</th>
+            <th>Monitoring Enabled At</th>
             <th>Updated</th>
             <th>Last Polled</th>
             <th>Cache Expires</th>

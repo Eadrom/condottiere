@@ -28,6 +28,11 @@ from app.esi.client import (
 from app.notifications.parsing import parse_notification_text
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.services.backoff import compute_backoff_seconds
+from app.services.delivery_policy import (
+    MAX_DELIVERY_AGE_HOURS,
+    notification_is_stale,
+    notification_predates_monitoring_window,
+)
 
 SENDER_BATCH_SIZE = 50
 
@@ -75,6 +80,12 @@ def _extract_name_lookup_ids(notification: Notification) -> tuple[set[int], set[
 def _mark_sent(delivery: Delivery, now: datetime) -> None:
     delivery.status = "sent"
     delivery.last_error = None
+    delivery.updated_at = now
+
+
+def _mark_expired(delivery: Delivery, *, now: datetime, reason: str) -> None:
+    delivery.status = "expired"
+    delivery.last_error = reason[:1000]
     delivery.updated_at = now
 
 
@@ -229,6 +240,54 @@ def run_sender_once() -> None:
         for delivery, notification, character in rows:
             processed += 1
             now = datetime.now(UTC).replace(tzinfo=None)
+            if notification_predates_monitoring_window(
+                notification,
+                character=character,
+                settings=settings,
+            ):
+                _mark_expired(
+                    delivery,
+                    now=now,
+                    reason="notification predates monitoring enable window",
+                )
+                print(
+                    "sender",
+                    f"delivery={delivery.id}",
+                    f"character={character.character_id}",
+                    "status=expired",
+                    f"notification_id={notification.notification_id}",
+                    "reason=predates_monitoring_window",
+                )
+                try:
+                    db.commit()
+                except SQLAlchemyError as exc:
+                    db.rollback()
+                    print("sender", f"delivery={delivery.id}", f"db-commit-error={exc}")
+                continue
+
+            if settings.env.lower() == "prod" and notification_is_stale(notification, now=now):
+                _mark_expired(
+                    delivery,
+                    now=now,
+                    reason=(
+                        f"notification older than {MAX_DELIVERY_AGE_HOURS}h; "
+                        "dropping stale delivery"
+                    ),
+                )
+                print(
+                    "sender",
+                    f"delivery={delivery.id}",
+                    f"character={character.character_id}",
+                    "status=expired",
+                    f"notification_id={notification.notification_id}",
+                )
+                try:
+                    db.commit()
+                except SQLAlchemyError as exc:
+                    db.rollback()
+                    print("sender", f"delivery={delivery.id}", f"db-commit-error={exc}")
+                continue
+
             destination, destination_debug = resolve_destination_with_debug(
                 db,
                 character=character,

@@ -52,6 +52,11 @@ def _ensure_local_schema_compatibility() -> None:
                 "ALTER TABLE characters "
                 "ADD COLUMN monitoring_enabled BOOLEAN NOT NULL DEFAULT 0"
             )
+        if "monitoring_enabled_at" not in existing_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE characters "
+                "ADD COLUMN monitoring_enabled_at DATETIME NULL"
+            )
         if "personal_mention_text" not in existing_columns:
             conn.exec_driver_sql(
                 "ALTER TABLE characters "

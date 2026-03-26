@@ -45,6 +45,7 @@ def upsert_character_from_identity(
             refresh_token_encrypted=encrypted_refresh,
             scopes=_merge_scopes("", scopes),
             monitoring_enabled=enable_monitoring,
+            monitoring_enabled_at=now if enable_monitoring else None,
             personal_webhook_url=None,
             personal_mention_text="",
             # New users default to corp webhook when their corp already configured one.
@@ -64,6 +65,7 @@ def upsert_character_from_identity(
         if enable_monitoring:
             character.monitoring_enabled = True
             if not was_monitoring_enabled:
+                character.monitoring_enabled_at = now
                 esi_state = db.get(EsiState, character_id)
                 if esi_state is not None:
                     db.delete(esi_state)
@@ -82,6 +84,7 @@ def disable_character_monitoring(db: Session, *, character_id: int) -> bool:
 
     now = datetime.now(UTC).replace(tzinfo=None)
     character.monitoring_enabled = False
+    character.monitoring_enabled_at = None
     character.refresh_token_encrypted = None
     character.scopes = _remove_scope(character.scopes, MONITORING_SCOPE)
     esi_state = db.get(EsiState, character_id)

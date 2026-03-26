@@ -17,6 +17,7 @@ class Character(Base):
     refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     scopes: Mapped[str] = mapped_column(Text, default="")
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    monitoring_enabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     personal_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     personal_mention_text: Mapped[str] = mapped_column(String(255), default="")
     use_corp_webhook: Mapped[bool] = mapped_column(Boolean, default=False)

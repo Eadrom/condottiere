@@ -15,10 +15,10 @@ from app.esi.client import fetch_notifications, refresh_access_token
 from app.notifications.filtering import is_relevant_notification
 from app.notifications.parsing import parse_notification_text
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
+from app.services.delivery_policy import has_delivery_channel, monitoring_enable_cutoff
 from app.telemetry.events import maybe_emit_heartbeat
 
 POLLER_TIME_BUDGET_SECONDS = 60
-INITIAL_PROD_ALERT_LOOKBACK_MINUTES = 10
 
 
 def _parse_esi_timestamp(value: str | None) -> datetime | None:
@@ -213,27 +213,29 @@ def run_poller_once(force_refresh: bool = False) -> None:
                     access_token=access_token,
                     etag=None if effective_force_refresh else esi_state.notif_etag,
                 )
-                min_timestamp = None
-                if (
-                    settings.env.lower() == "prod"
-                    and not effective_force_refresh
-                    and esi_state.last_polled_at is None
-                ):
-                    min_timestamp = now - timedelta(
-                        minutes=INITIAL_PROD_ALERT_LOOKBACK_MINUTES
-                    )
+                min_timestamp = (
+                    None
+                    if effective_force_refresh
+                    else monitoring_enable_cutoff(character, settings=settings)
+                )
                 relevant_count, inserted_count, inserted_notification_ids = _store_relevant_notifications(
                     db,
                     character_id=character.character_id,
                     notifications=result["notifications"],
                     min_timestamp=min_timestamp,
                 )
-                queued_count = _enqueue_deliveries_for_notifications(
+                queued_count = 0
+                if inserted_notification_ids and has_delivery_channel(
                     db,
-                    character_id=character.character_id,
-                    notification_ids=inserted_notification_ids,
-                    now=now,
-                )
+                    character=character,
+                    settings=settings,
+                ):
+                    queued_count = _enqueue_deliveries_for_notifications(
+                        db,
+                        character_id=character.character_id,
+                        notification_ids=inserted_notification_ids,
+                        now=now,
+                    )
 
                 esi_state.notif_etag = result.get("etag") or esi_state.notif_etag
                 esi_state.notif_expires_at = result.get("expires_at") or (

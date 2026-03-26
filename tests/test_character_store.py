@@ -5,9 +5,10 @@ from datetime import UTC, datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.db.models import Character
 from app.db.base import Base
 from app.db.models import CorpSetting
-from app.services.character_store import upsert_character_from_identity
+from app.services.character_store import disable_character_monitoring, upsert_character_from_identity
 
 
 def _session():
@@ -42,6 +43,7 @@ def test_new_character_defaults_to_corp_webhook_when_corp_setting_exists():
         )
 
         assert character.use_corp_webhook is True
+        assert character.monitoring_enabled_at is not None
 
 
 def test_new_character_defaults_to_mail_when_corp_setting_missing():
@@ -57,3 +59,38 @@ def test_new_character_defaults_to_mail_when_corp_setting_missing():
         )
 
         assert character.use_corp_webhook is False
+        assert character.monitoring_enabled_at is not None
+
+
+def test_reenable_monitoring_sets_new_monitoring_enabled_at():
+    with _session() as db:
+        original = upsert_character_from_identity(
+            db,
+            character_id=333,
+            character_name="Pilot Three",
+            corporation_id=9003,
+            scopes=["publicData"],
+            enable_monitoring=True,
+            refresh_token="refresh-token",
+        )
+        first_enabled_at = original.monitoring_enabled_at
+        assert first_enabled_at is not None
+
+        disabled = disable_character_monitoring(db, character_id=333)
+        assert disabled is True
+        row = db.get(Character, 333)
+        assert row is not None
+        assert row.monitoring_enabled is False
+        assert row.monitoring_enabled_at is None
+
+        reenabled = upsert_character_from_identity(
+            db,
+            character_id=333,
+            character_name="Pilot Three",
+            corporation_id=9003,
+            scopes=["publicData"],
+            enable_monitoring=True,
+            refresh_token="refresh-token",
+        )
+        assert reenabled.monitoring_enabled_at is not None
+        assert reenabled.monitoring_enabled_at >= first_enabled_at
