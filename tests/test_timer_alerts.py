@@ -194,3 +194,97 @@ def test_summary_once_per_slot_per_destination_without_ping(h):
     # Next slot posts again, but only where timers are still upcoming (personal's 18:00 is out).
     assert run(datetime(2026, 10, 9, 23, 31)) == 1
     assert h.posts[-1][0] == CORP_HOOK and h.posts[-1][1].startswith("**Upcoming Merc Den timers** (1)")
+
+
+def test_failure_after_a_warning_posts_does_not_repeat_it(h, monkeypatch):
+    """A crash later in the run must not lose the 'warned' mark and re-ping next run."""
+    h.set_corp()
+    h.add_character(7, use_corp=True)
+    exits = datetime(2026, 10, 9, 22, 52)
+    _add_timer(h, 7, exits, 1)
+    _add_timer(h, 7, exits + timedelta(minutes=1), 2)
+    calls = {"n": 0}
+
+    def post(destination, payload):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("unexpected failure after first ping")
+        h.posts.append((destination.webhook_url, payload["content"]))
+        return WebhookPostResult(ok=True)
+
+    at = exits - timedelta(minutes=10)
+    with h.Session() as db:
+        assert send_due_warnings(db, settings=h.settings, now=at, post_discord=post, send_mail=_mailer(h), lookup_names=_names) == 1
+    with h.Session() as db:
+        assert send_due_warnings(db, settings=h.settings, now=at, post_discord=_poster(h), send_mail=_mailer(h), lookup_names=_names) == 1
+        assert send_due_warnings(db, settings=h.settings, now=at, post_discord=_poster(h), send_mail=_mailer(h), lookup_names=_names) == 0
+    assert len(h.posts) == 2  # timer 1 once, timer 2 once after its failed attempt
+
+
+# --- Regression tests from the pre-deploy review -------------------------------------------
+
+
+def test_if_saving_the_claim_fails_nothing_is_posted(h, monkeypatch):
+    h.set_corp()
+    h.add_character(7, use_corp=True)
+    exits = datetime(2026, 10, 9, 22, 52)
+    _add_timer(h, 7, exits, 1)
+    with h.Session() as db:
+        monkeypatch.setattr(db, "commit", lambda: (_ for _ in ()).throw(RuntimeError("db read-only")))
+        with pytest.raises(RuntimeError):
+            send_due_warnings(db, settings=h.settings, now=exits - timedelta(minutes=10), post_discord=_poster(h), send_mail=_mailer(h), lookup_names=_names)
+    assert h.posts == []
+
+
+def test_unmonitored_pilots_get_no_warnings_or_summaries(h):
+    h.set_corp()
+    h.add_character(7, use_corp=True)
+    with h.Session() as db:
+        db.get(Character, 7).monitoring_enabled = False
+        db.commit()
+    exits = datetime(2026, 10, 9, 22, 52)
+    _add_timer(h, 7, exits, 1)
+    with h.Session() as db:
+        assert send_due_warnings(db, settings=h.settings, now=exits - timedelta(minutes=10), post_discord=_poster(h), send_mail=_mailer(h), lookup_names=_names) == 0
+        assert send_due_summaries(db, settings=h.settings, now=datetime(2026, 10, 9, 11, 31), post_discord=_poster(h), lookup_names=_names) == 0
+    assert h.posts == []
+
+
+def test_filter_added_after_the_timer_blocks_warning_and_summary(h):
+    u = h.universe()
+    h.set_corp(_f(u, list_mode="blacklist", places_text="Alpha"))
+    h.add_character(7, use_corp=True)
+    exits = datetime(2026, 10, 9, 22, 52)
+    _add_timer(h, 7, exits, 1, system=101)  # A1, in the blacklisted Alpha region
+    with h.Session() as db:
+        send_due_warnings(db, settings=h.settings, now=exits - timedelta(minutes=10), post_discord=_poster(h), send_mail=_mailer(h), lookup_names=_names, universe=u)
+        assert send_due_summaries(db, settings=h.settings, now=datetime(2026, 10, 9, 11, 31), post_discord=_poster(h), lookup_names=_names, universe=u) == 0
+        assert db.get(DenTimer, 1).warned_at is not None  # handled, will not be retried
+    assert h.posts == []
+
+
+def test_two_sent_deliveries_for_one_notification_make_one_timer(h):
+    from app.db.models import Delivery
+
+    h.add_character(8, personal_hook=PERSONAL_HOOK)
+    nid = h.queue(8, _reinforced_text(h.now, h.now + timedelta(hours=20)), notif_type="MercenaryDenReinforced")
+    with h.Session() as db:
+        db.query(Delivery).filter_by(notification_id=nid).one().status = "sent"
+        db.add(Delivery(character_id=8, notification_id=nid, destination_key="corp:500", status="sent", attempts=0,
+                        next_attempt_at=h.now, created_at=h.now, updated_at=h.now))
+        db.commit()
+        assert sync_timers(db, now=h.now) == 1
+        db.commit()
+        assert db.query(DenTimer).count() == 1
+
+
+def test_one_channel_reached_two_ways_gets_one_summary(h):
+    h.set_corp()
+    h.add_character(7, use_corp=True)
+    h.add_character(8, personal_hook=CORP_HOOK)  # same channel as the corp webhook
+    _add_timer(h, 7, datetime(2026, 10, 9, 20, 0), 1)
+    _add_timer(h, 8, datetime(2026, 10, 9, 21, 0), 2)
+    with h.Session() as db:
+        assert send_due_summaries(db, settings=h.settings, now=datetime(2026, 10, 9, 11, 31), post_discord=_poster(h), lookup_names=_names) == 1
+        assert send_due_summaries(db, settings=h.settings, now=datetime(2026, 10, 9, 11, 33), post_discord=_poster(h), lookup_names=_names) == 0
+    assert len(h.posts) == 1 and h.posts[0][1].startswith("**Upcoming Merc Den timers** (2)")

@@ -38,6 +38,7 @@ from app.services.delivery_policy import (
 )
 from app.services.timer_alerts import send_due_summaries, send_due_warnings, sync_timers
 from app.services.universe_health import UniverseGate
+from app.universe.model import load_universe
 
 SENDER_BATCH_SIZE = 50
 UNIVERSE_HOLD_SECONDS = 300
@@ -362,7 +363,19 @@ def _run_timer_alerts(db, *, settings, token_cache: dict[int, str], last_discord
     now = datetime.now(UTC).replace(tzinfo=None)
     warnings_sent = summaries_sent = 0
     try:
+        universe = load_universe(settings.universe_data_dir)  # for filter re-checks; never rebuilt here
+    except Exception as exc:  # noqa: BLE001
+        print("sender", f"timer-universe-unreadable={exc!r}")
+        universe = None
+    # Each phase is isolated: a failure in one must not skip the others or undo
+    # bookkeeping for posts already made (warnings and summaries commit per post).
+    try:
         sync_timers(db, now=now)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - log and keep the sender alive
+        db.rollback()
+        print("sender", f"timer-sync-error={exc!r}")
+    try:
         warnings_sent = send_due_warnings(
             db,
             settings=settings,
@@ -370,18 +383,23 @@ def _run_timer_alerts(db, *, settings, token_cache: dict[int, str], last_discord
             post_discord=post_discord,
             send_mail=send_mail_to_self,
             lookup_names=_lookup_names,
+            universe=universe,
         )
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        print("sender", f"timer-warning-error={exc!r}")
+    try:
         summaries_sent = send_due_summaries(
             db,
             settings=settings,
             now=now,
             post_discord=post_discord,
             lookup_names=_lookup_names,
+            universe=universe,
         )
-        db.commit()
-    except SQLAlchemyError as exc:
+    except Exception as exc:  # noqa: BLE001
         db.rollback()
-        print("sender", f"timer-alerts-db-error={exc}")
+        print("sender", f"timer-summary-error={exc!r}")
     return warnings_sent, summaries_sent
 
 

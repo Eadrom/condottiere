@@ -281,3 +281,33 @@ def test_missing_universe_holds_filtered_alerts_mails_admin_daily_and_heals(h, m
     assert h.delivery(held).status == "sent"
     with h.Session() as db:
         assert db.get(AppState, "universe_admin_mailed_at") is None
+
+
+def test_corrupt_cache_is_rebuilt_instead_of_crashing_the_sender(h, monkeypatch):
+    u = _f(h.universe(), list_mode="whitelist", places_text="Alpha")
+    cache_path(h.data_dir).write_text("{not json")
+    monkeypatch.setattr(universe_health, "ensure_universe_cache", lambda data_dir, **kw: _write_cache(h.data_dir))
+    h.add_character(8, personal_hook=PERSONAL_HOOK, alert_filter=u)
+    nid = h.queue(8, _system(A1))
+    sender_worker.run_sender_once()
+    assert h.delivery(nid).status == "sent"
+
+
+@pytest.mark.parametrize("error", [OSError("No space left on device"), sde.UniverseBusy("being built by another process")])
+def test_build_errors_hold_alerts_without_crashing(h, monkeypatch, error):
+    u = _f(h.universe(), list_mode="whitelist", places_text="Alpha")
+    cache_path(h.data_dir).unlink()
+    h.add_character(1, mail_scope=True)
+    h.add_character(8, personal_hook=PERSONAL_HOOK, alert_filter=u)
+    h.add_character(10, personal_hook=PERSONAL_HOOK)
+
+    def boom(data_dir, **kw):
+        raise error
+
+    monkeypatch.setattr(universe_health, "ensure_universe_cache", boom)
+    held, unfiltered = h.queue(8, _system(A1)), h.queue(10, _system(B2))
+    sender_worker.run_sender_once()
+    assert h.delivery(held).status == "pending"
+    assert h.delivery(unfiltered).status == "sent"
+    busy = isinstance(error, sde.UniverseBusy)
+    assert h.mails == ([] if busy else [(1, "Condottiere: universe data unavailable")])

@@ -34,8 +34,14 @@ class UniverseUnavailable(RuntimeError):
     """The pinned universe data is not on disk and could not be built right now."""
 
 
+class UniverseBusy(UniverseUnavailable):
+    """Another process is building the cache right now; not a failure."""
+
+
 def cache_path(data_dir: Path, build: int = PINNED_SDE_BUILD) -> Path:
-    return Path(data_dir) / f"universe-{build}.json"
+    # The format version is in the name so a release that changes the cache layout
+    # never trips over a file written by an older release.
+    return Path(data_dir) / f"universe-{build}-v{CACHE_FORMAT_VERSION}.json"
 
 
 def _english_name(record: dict) -> str:
@@ -147,7 +153,7 @@ def ensure_universe_cache(
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise UniverseUnavailable("universe data is being built by another process") from exc
+            raise UniverseBusy("universe data is being built by another process") from exc
 
         if target.is_file():
             return target

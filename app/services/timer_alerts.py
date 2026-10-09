@@ -4,20 +4,27 @@ Event alerts (attacked / reinforced / killed) never ping. The ping is reserved f
 warning shortly before a reinforced den becomes vulnerable again, and a summary of
 upcoming timers is posted at fixed UTC slots so no timer slips between check-ins.
 
-Timers come from Reinforced alerts that were actually sent, so location filters have
-already been applied to them.
+Timers come from Reinforced alerts that were actually sent. Because a pilot may change
+destination, or a filter may change, after that, the destination's filter is checked
+again when a warning or summary fires.
+
+Anti-spam rule: every warning and summary is marked done (and committed) BEFORE it is
+posted. If saving fails nothing is posted; if posting fails the mark is undone and it
+is retried. A ping can be missed in a crash, but never repeated.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+import hashlib
 from typing import Callable
 
 from sqlalchemy import and_, select
 
-from app.db.models import AppState, Character, DenTimer, Delivery, Notification
+from app.db.models import AppState, Character, CorpSetting, DenTimer, Delivery, Notification
 from app.delivery.resolver import resolve_destination
+from app.notifications.location_filter import StoredFilterError, evaluate, load_filter
 from app.delivery.sender import (
     WebhookPostResult,
     build_timer_summary_payload,
@@ -25,6 +32,7 @@ from app.delivery.sender import (
     build_timer_warning_payload,
 )
 from app.notifications.parsing import parse_notification_text, reinforcement_exit_time
+from app.universe.model import Universe
 
 REINFORCED_TYPE = "MercenaryDenReinforced"
 WARNING_LEAD = timedelta(minutes=30)
@@ -72,7 +80,13 @@ def sync_timers(db, *, now: datetime) -> int:
     ).scalars().all()
 
     created = 0
+    seen: set[tuple[int, int]] = set()
     for notification in rows:
+        # A notification can have more than one sent delivery row; one timer per notification.
+        key = (notification.character_id, notification.notification_id)
+        if key in seen:
+            continue
+        seen.add(key)
         details = parse_notification_text(notification.raw_text or "")
         exits_at = reinforcement_exit_time(details)
         if exits_at is None:
@@ -92,6 +106,32 @@ def sync_timers(db, *, now: datetime) -> int:
     if created:
         db.flush()
     return created
+
+
+def _monitored():
+    return and_(Character.is_active.is_(True), Character.monitoring_enabled.is_(True))
+
+
+def _filter_blocks(db, destination, character: Character, system_id: int | None, universe: Universe | None) -> bool:
+    """True if the destination's current filter would block an alert in this system."""
+    if destination is not None and destination.destination_key.startswith("corp:"):
+        corp_setting = db.get(CorpSetting, character.corporation_id)
+        raw = corp_setting.alert_filter if corp_setting is not None else ""
+    else:
+        raw = character.alert_filter or ""
+    try:
+        alert_filter = load_filter(raw)
+    except StoredFilterError:
+        return False
+    if not alert_filter.active or universe is None:
+        # Without map data we cannot re-check; the timer passed the filter when it was created.
+        return False
+    return not evaluate(alert_filter, system_id, universe).send
+
+
+def _channel_key(destination) -> str:
+    """Stable, non-secret key per webhook URL, so one channel never gets two summaries."""
+    return hashlib.sha256(destination.webhook_url.encode()).hexdigest()[:32]
 
 
 def _timer_context(timer: DenTimer, character: Character) -> dict:
@@ -119,6 +159,7 @@ def send_due_warnings(
     post_discord: PostDiscord,
     send_mail: SendMail,
     lookup_names: LookupNames,
+    universe: Universe | None = None,
 ) -> int:
     """Warn once per timer when it is within WARNING_LEAD of exiting. Past timers never warn."""
     due = db.execute(
@@ -128,6 +169,7 @@ def send_due_warnings(
             DenTimer.warned_at.is_(None),
             DenTimer.exits_at > now,
             DenTimer.exits_at <= now + WARNING_LEAD,
+            _monitored(),
         )
         .order_by(DenTimer.exits_at.asc())
     ).all()
@@ -146,20 +188,36 @@ def send_due_warnings(
                 settings.discord_test_webhook_url if settings.env.lower() == "dev" else None
             ),
         )
-        if destination is not None and destination.webhook_url:
-            result = post_discord(
-                destination,
-                build_timer_warning_payload(context, destination.mention_text, name_lookup=names),
-            )
-            ok, error = result.ok, result.error
-        elif settings.eve_mail_fallback_enabled:
-            subject, body = build_timer_warning_mail(
-                context, settings.eve_mail_subject_prefix, name_lookup=names
-            )
-            ok, error = send_mail(character, subject, body)
-        else:
-            ok, error = False, "no destination for timer warning"
 
+        # Claim first: once this commit succeeds, no later failure can cause a second ping.
+        timer.warned_at = now
+        db.commit()
+
+        if _filter_blocks(db, destination, character, timer.solar_system_id, universe):
+            print("timer-warning", f"timer={timer.id}", f"character={character.character_id}", "status=filtered")
+            continue
+
+        try:
+            if destination is not None and destination.webhook_url:
+                result = post_discord(
+                    destination,
+                    build_timer_warning_payload(context, destination.mention_text, name_lookup=names),
+                )
+                ok, error = result.ok, result.error
+            elif settings.eve_mail_fallback_enabled:
+                subject, body = build_timer_warning_mail(
+                    context, settings.eve_mail_subject_prefix, name_lookup=names
+                )
+                ok, error = send_mail(character, subject, body)
+            else:
+                ok, error = False, "no destination for timer warning"
+        except Exception as exc:  # noqa: BLE001 - treat as not delivered
+            db.rollback()
+            ok, error = False, repr(exc)
+
+        if not ok:
+            timer.warned_at = None  # not delivered: retry next run (still before exit)
+        db.commit()  # also persists any refresh token rotated while sending
         print(
             "timer-warning",
             f"timer={timer.id}",
@@ -168,7 +226,6 @@ def send_due_warnings(
             f"error={error or '-'}",
         )
         if ok:
-            timer.warned_at = now
             sent += 1
     return sent
 
@@ -195,8 +252,9 @@ def send_due_summaries(
     now: datetime,
     post_discord: PostDiscord,
     lookup_names: LookupNames,
+    universe: Universe | None = None,
 ) -> int:
-    """Post the upcoming-timer summary once per slot to each Discord destination that has timers."""
+    """Post the upcoming-timer summary once per slot to each Discord channel that has timers."""
     slot = current_summary_slot(now, settings.timer_summary_times_utc)
     if slot is None:
         return 0
@@ -204,12 +262,13 @@ def send_due_summaries(
     upcoming = db.execute(
         select(DenTimer, Character)
         .join(Character, Character.character_id == DenTimer.character_id)
-        .where(DenTimer.exits_at > now)
+        .where(DenTimer.exits_at > now, _monitored())
         .order_by(DenTimer.exits_at.asc())
     ).all()
     if not upcoming:
         return 0
 
+    slot_value = slot.isoformat()
     destinations: dict[str, object] = {}
     grouped: dict[str, list[tuple[DenTimer, Character]]] = defaultdict(list)
     for timer, character in upcoming:
@@ -223,39 +282,55 @@ def send_due_summaries(
         )
         if destination is None or not destination.webhook_url:
             continue  # EVE-mail pilots get warnings, not summaries
-        grouped[destination.destination_key].append((timer, character))
-        destinations[destination.destination_key] = destination
+        if _filter_blocks(db, destination, character, timer.solar_system_id, universe):
+            continue
+        key = _channel_key(destination)
+        state = db.get(AppState, f"{_SUMMARY_KEY_PREFIX}{key}")
+        if state is not None and state.value == slot_value:
+            continue  # this channel already has this slot's summary
+        grouped[key].append((timer, character))
+        destinations[key] = destination
 
     if not grouped:
         return 0
-    names = _names_for([timer for timer, _ in upcoming], lookup_names)
+    names = _names_for([timer for pairs in grouped.values() for timer, _ in pairs], lookup_names)
 
     posted = 0
-    slot_value = slot.isoformat()
     for key, pairs in grouped.items():
-        state_key = f"{_SUMMARY_KEY_PREFIX}{key}"[:255]
+        state_key = f"{_SUMMARY_KEY_PREFIX}{key}"
         state = db.get(AppState, state_key)
-        if state is not None and state.value == slot_value:
-            continue
-        destination = destinations[key]
+        previous = state.value if state is not None else None
+        # Claim the slot before posting, so a failed save can never cause a repeat summary.
+        if state is None:
+            state = AppState(key=state_key, value=slot_value)
+            db.add(state)
+        else:
+            state.value = slot_value
+        db.commit()
+
         payload = build_timer_summary_payload(
             [_timer_context(timer, character) for timer, character in pairs],
             name_lookup=names,
         )
-        result = post_discord(destination, payload)
+        try:
+            result = post_discord(destinations[key], payload)
+        except Exception as exc:  # noqa: BLE001 - treat as not posted
+            db.rollback()
+            result = WebhookPostResult(ok=False, error=repr(exc))
+        if not result.ok:
+            if previous is None:
+                db.delete(state)
+            else:
+                state.value = previous
+            db.commit()
         print(
             "timer-summary",
-            f"destination={key}",
+            f"channel={key[:8]}",
             f"slot={slot_value}",
             f"timers={len(pairs)}",
             f"status={'sent' if result.ok else 'retry'}",
             f"error={result.error or '-'}",
         )
-        if not result.ok:
-            continue
-        if state is None:
-            db.add(AppState(key=state_key, value=slot_value))
-        else:
-            state.value = slot_value
-        posted += 1
+        if result.ok:
+            posted += 1
     return posted

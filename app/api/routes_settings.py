@@ -548,6 +548,11 @@ async def set_corp_filter(request: Request):
     form = await request.form()
     if not _validate_form_csrf(request, form):
         return _redirect_with_notice("Invalid CSRF token. Refresh and try again.", error=True)
+    # Validate before the role check, which may rotate the SSO refresh token.
+    try:
+        alert_filter = _parse_filter_from_form(form, prefix="corp")
+    except ValueError as exc:
+        return _redirect_with_notice(str(exc), error=True)
 
     now = datetime.now(UTC).replace(tzinfo=None)
     try:
@@ -574,12 +579,6 @@ async def set_corp_filter(request: Request):
                     "You do not have a corporation role permitted to edit corp alert settings.",
                     error=True,
                 )
-
-            try:
-                alert_filter = _parse_filter_from_form(form, prefix="corp")
-            except ValueError as exc:
-                db.rollback()
-                return _redirect_with_notice(str(exc), error=True)
 
             corp_setting.alert_filter = alert_filter.to_json()
             corp_setting.updated_by_character_id = character.character_id
