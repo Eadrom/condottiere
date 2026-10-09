@@ -62,6 +62,18 @@ def _ensure_local_schema_compatibility() -> None:
                 "ALTER TABLE characters "
                 "ADD COLUMN personal_mention_text VARCHAR(255) NOT NULL DEFAULT ''"
             )
+        if "alert_filter" not in existing_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE characters ADD COLUMN alert_filter TEXT NOT NULL DEFAULT ''"
+            )
+
+        corp_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(corp_settings)").fetchall()
+        }
+        if "alert_filter" not in corp_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE corp_settings ADD COLUMN alert_filter TEXT NOT NULL DEFAULT ''"
+            )
 
 
 def _maybe_reset_dev_notification_history() -> None:

@@ -21,6 +21,8 @@ class Character(Base):
     personal_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     personal_mention_text: Mapped[str] = mapped_column(String(255), default="")
     use_corp_webhook: Mapped[bool] = mapped_column(Boolean, default=False)
+    # JSON from app.notifications.location_filter; empty string means no filter.
+    alert_filter: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
@@ -33,6 +35,7 @@ class CorpSetting(Base):
     webhook_url: Mapped[str] = mapped_column(Text)
     mention_text: Mapped[str] = mapped_column(String(255), default="")
     allowed_roles: Mapped[str] = mapped_column(Text, default='["Director"]')
+    alert_filter: Mapped[str] = mapped_column(Text, default="")
     updated_by_character_id: Mapped[int] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 
@@ -76,6 +79,28 @@ class Delivery(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class DenTimer(Base):
+    """A reinforced Merc Den whose alert was delivered; drives 30-minute warnings and summaries."""
+
+    __tablename__ = "den_timers"
+    __table_args__ = (
+        UniqueConstraint(
+            "character_id",
+            "notification_id",
+            name="uq_den_timers_character_notif",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    character_id: Mapped[int] = mapped_column(BigInteger)
+    notification_id: Mapped[int] = mapped_column(BigInteger)
+    solar_system_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    planet_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    exits_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    warned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 class EsiState(Base):

@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth.scopes import CORP_ROLES_SCOPE
+from app.config import get_settings
 from app.db.models import Character, CorpSetting
 from app.db.session import SessionLocal
 from app.delivery.mentions import (
@@ -23,9 +24,11 @@ from app.delivery.mentions import (
     build_mention_text,
 )
 from app.esi.client import fetch_character_roles, refresh_access_token
+from app.notifications.location_filter import AlertFilter, build_filter
 from app.security.csrf import ensure_csrf_session_id, validate_csrf_token
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.telemetry.events import set_telemetry_consent
+from app.universe.model import load_universe
 
 router = APIRouter()
 
@@ -487,6 +490,105 @@ async def delete_corp_webhook(request: Request):
         return _redirect_with_notice("Failed to delete corporation webhook.", error=True)
 
     return _redirect_with_notice("Corporation webhook removed.")
+
+
+def _parse_filter_from_form(form, *, prefix: str) -> AlertFilter:
+    """Validate a filter form against the universe data. Raises ValueError with the reason."""
+    universe = load_universe(get_settings().universe_data_dir)
+    if universe is None:
+        raise ValueError("EVE map data is still loading on the server. Try again in a minute.")
+    return build_filter(
+        universe,
+        list_mode=str(form.get(f"{prefix}_filter_list_mode", "off")),
+        places_text=str(form.get(f"{prefix}_filter_places", "")),
+        range_origin_text=str(form.get(f"{prefix}_filter_range_origin", "")),
+        range_jumps_text=str(form.get(f"{prefix}_filter_range_jumps", "")),
+    )
+
+
+@router.post("/me/filter")
+async def set_personal_filter(request: Request):
+    """Set the location filter for this character's own alerts (personal webhook / EVE mail)."""
+    character_id = _require_logged_in_character_id(request)
+    if character_id is None:
+        request.session["auth_error"] = "Log in first to configure alerts."
+        return RedirectResponse(url="/", status_code=302)
+
+    form = await request.form()
+    if not _validate_form_csrf(request, form):
+        return _redirect_with_notice("Invalid CSRF token. Refresh and try again.", error=True)
+    try:
+        alert_filter = _parse_filter_from_form(form, prefix="personal")
+    except ValueError as exc:
+        return _redirect_with_notice(str(exc), error=True)
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    try:
+        with SessionLocal() as db:
+            character = db.get(Character, character_id)
+            if character is None:
+                return _redirect_with_notice("Character record not found.", error=True)
+            character.alert_filter = alert_filter.to_json()
+            character.updated_at = now
+            db.commit()
+    except SQLAlchemyError:
+        return _redirect_with_notice("Failed to save personal alert filter.", error=True)
+
+    return _redirect_with_notice("Personal alert filter saved.")
+
+
+@router.post("/corp/filter")
+async def set_corp_filter(request: Request):
+    """Set the corporation location filter. Same permission as editing the corp webhook."""
+    character_id = _require_logged_in_character_id(request)
+    if character_id is None:
+        request.session["auth_error"] = "Log in first to configure alerts."
+        return RedirectResponse(url="/", status_code=302)
+
+    form = await request.form()
+    if not _validate_form_csrf(request, form):
+        return _redirect_with_notice("Invalid CSRF token. Refresh and try again.", error=True)
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    try:
+        with SessionLocal() as db:
+            character = db.get(Character, character_id)
+            if character is None:
+                return _redirect_with_notice("Character record not found.", error=True)
+
+            corp_setting = db.get(CorpSetting, character.corporation_id)
+            if corp_setting is None:
+                return _redirect_with_notice(
+                    "Set up the corporation webhook before adding a corp filter.",
+                    error=True,
+                )
+
+            allowed_roles = _load_allowed_roles(corp_setting)
+            roles, error = _fetch_live_corp_roles(character)
+            if roles is None:
+                db.rollback()
+                return _redirect_with_notice(error or "Not authorized.", error=True)
+            if not _can_edit_corp_webhook(roles=roles, allowed_roles=allowed_roles):
+                db.rollback()
+                return _redirect_with_notice(
+                    "You do not have a corporation role permitted to edit corp alert settings.",
+                    error=True,
+                )
+
+            try:
+                alert_filter = _parse_filter_from_form(form, prefix="corp")
+            except ValueError as exc:
+                db.rollback()
+                return _redirect_with_notice(str(exc), error=True)
+
+            corp_setting.alert_filter = alert_filter.to_json()
+            corp_setting.updated_by_character_id = character.character_id
+            corp_setting.updated_at = now
+            db.commit()
+    except SQLAlchemyError:
+        return _redirect_with_notice("Failed to save corporation alert filter.", error=True)
+
+    return _redirect_with_notice("Corporation alert filter saved.")
 
 
 @router.post("/telemetry/consent")

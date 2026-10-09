@@ -25,6 +25,16 @@ from app.delivery.mentions import (
 )
 from app.delivery.resolver import choose_destination
 from app.esi.client import fetch_character_roles, refresh_access_token
+from app.notifications.location_filter import (
+    LIST_BLACKLIST,
+    LIST_OFF,
+    LIST_WHITELIST,
+    NO_FILTER,
+    StoredFilterError,
+    describe,
+    form_values,
+    load_filter,
+)
 from app.security.csrf import ensure_csrf_session_id, issue_csrf_token
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.telemetry.events import (
@@ -1061,6 +1071,16 @@ def _render_how_it_works(character: dict | None, csrf_token: str) -> str:
     </div>
 
     <div class="panel">
+      <h2>Pings and Timers</h2>
+      <ul>
+        <li>Attacked, reinforced and destroyed alerts are posted without a ping.</li>
+        <li>Reinforced alerts show when the den leaves reinforcement, in EVE time and in your local time.</li>
+        <li>About <code>30 minutes</code> before a den leaves reinforcement, Condottiere posts a warning with your configured ping so people can form up to defend or rep it.</li>
+        <li>A summary of upcoming timers is posted twice a day (default <code>11:30</code> and <code>23:30</code> EVE time), so short timers do not slip between check-ins.</li>
+      </ul>
+    </div>
+
+    <div class="panel">
       <h2>Polling and Cache Behavior <span class="pill pill-ok">API-Limited</span></h2>
       <ul>
         <li>Poller schedule runs every minute, but calls are cache-aware using <code>ETag</code> and <code>Expires</code>.</li>
@@ -1178,6 +1198,64 @@ def _fetch_live_corp_roles_for_ui(character_row: Character) -> tuple[set[str], s
     return roles, None
 
 
+def _load_filter_for_ui(raw: str | None):
+    try:
+        return load_filter(raw), None
+    except StoredFilterError as exc:
+        return NO_FILTER, str(exc)
+
+
+def _render_filter_form(*, prefix: str, action: str, raw_filter: str | None, csrf_token: str, button_label: str) -> str:
+    alert_filter, load_error = _load_filter_for_ui(raw_filter)
+    values = form_values(alert_filter)
+    error_html = (
+        f"<div class='flash error'>Saved filter could not be read and is being ignored: {escape(load_error)}</div>"
+        if load_error
+        else ""
+    )
+
+    def radio(mode: str, label: str) -> str:
+        checked = "checked" if values["list_mode"] == mode else ""
+        return (
+            "<label class='radio-item'>"
+            f"<input type='radio' name='{prefix}_filter_list_mode' value='{mode}' {checked} />{label}"
+            "</label>"
+        )
+
+    return f"""
+      {error_html}
+      <div class="snapshot" style="margin-bottom:10px;">Active: <strong>{escape(describe(alert_filter))}</strong></div>
+      <form method="post" action="{action}">
+        <input type="hidden" name="csrf_token" value="{escape(csrf_token)}" />
+        <label>Places</label>
+        <div class="radio-group">
+          {radio(LIST_OFF, "Off: alert everywhere")}
+          {radio(LIST_WHITELIST, "Whitelist: only alert in these places")}
+          {radio(LIST_BLACKLIST, "Blacklist: never alert in these places")}
+        </div>
+        <div class="row">
+          <div>
+            <label for="{prefix}_filter_places">Regions, constellations or systems (comma or one per line)</label>
+            <textarea id="{prefix}_filter_places" name="{prefix}_filter_places" rows="3" placeholder="Delve, Querious, 1DQ1-A">{escape(values["places"])}</textarea>
+          </div>
+          <div>
+            <label>Jump range (leave both blank for no range limit)</label>
+            <div class="range-row">
+              <input type="text" name="{prefix}_filter_range_origin" value="{escape(values["range_origin"])}" placeholder="Staging system, e.g. 1DQ1-A" />
+              <input type="number" min="0" max="100" name="{prefix}_filter_range_jumps" value="{escape(values["range_jumps"])}" placeholder="Jumps" />
+            </div>
+          </div>
+        </div>
+        <div class="muted" style="margin-bottom:10px;">
+          Names are checked against the EVE map when you save. If you set both places and a range,
+          an alert has to pass both. Jumps count stargates only (no Ansiblex, wormholes or filaments),
+          and never route through Zarzakh. Alerts whose location can't be worked out are always sent.
+        </div>
+        <button type="submit">{escape(button_label)}</button>
+      </form>
+    """
+
+
 def _render_alerts_page(
     *,
     session_character: dict,
@@ -1292,7 +1370,8 @@ def _render_alerts_page(
             <input id="corp_webhook_url" name="corp_webhook_url" type="url" value="{escape(corp_webhook)}" placeholder="https://discord.com/api/webhooks/..." />
           </div>
           <div>
-            <label>Corporation Mention (optional)</label>
+            <label>Corporation Ping for Timer Warnings (optional)</label>
+            <div class="muted" style="margin-bottom:6px;">Only the 30-minute "leaving reinforcement" warning pings. Attack, reinforce and kill alerts never do.</div>
             <div class="roles-grid">
               <label class="role-item">
                 <input type="radio" name="corp_mention_mode" value="{MENTION_NONE}" {"checked" if corp_mention_form["mode"] == MENTION_NONE else ""} />
@@ -1334,6 +1413,37 @@ def _render_alerts_page(
         <button type="submit" class="danger">Delete Corporation Webhook</button>
       </form>
         """
+
+    personal_filter_html = _render_filter_form(
+        prefix="personal",
+        action="/settings/me/filter",
+        raw_filter=character_row.alert_filter,
+        csrf_token=csrf_token,
+        button_label="Save Personal Filter",
+    )
+    personal_filter_note = (
+        "<div class='flash notice'>Your alerts go to the corporation webhook, so the corporation's "
+        "filter applies and this one is ignored until you switch to a personal webhook or EVE mail.</div>"
+        if character_row.use_corp_webhook
+        else "<div class='muted' style='margin-bottom:8px;'>Applies to alerts sent to your personal webhook or by EVE mail.</div>"
+    )
+    if not corp_exists:
+        corp_filter_html = "<div class='muted'>Set up the corporation webhook first.</div>"
+    elif corp_scope_granted and corp_can_edit:
+        corp_filter_html = _render_filter_form(
+            prefix="corp",
+            action="/settings/corp/filter",
+            raw_filter=corp_setting.alert_filter,
+            csrf_token=csrf_token,
+            button_label="Save Corporation Filter",
+        )
+    else:
+        corp_filter, _ = _load_filter_for_ui(corp_setting.alert_filter)
+        corp_filter_html = (
+            f"<div class='snapshot'>Active: <strong>{escape(describe(corp_filter))}</strong></div>"
+            f"<div class='muted'>Only roles allowed to edit the corporation webhook can change this "
+            f"({escape(corp_roles)}).</div>"
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1483,7 +1593,7 @@ def _render_alerts_page(
       display: block;
       margin-bottom: 4px;
     }}
-    input[type="text"], input[type="url"] {{
+    input[type="text"], input[type="url"], input[type="number"], textarea {{
       width: 100%;
       border: 1px solid #404040;
       background: #0e0e0e;
@@ -1496,6 +1606,15 @@ def _render_alerts_page(
       display: grid;
       gap: 8px;
       margin-bottom: 10px;
+    }}
+    textarea {{
+      font-family: inherit;
+      resize: vertical;
+    }}
+    .range-row {{
+      display: grid;
+      grid-template-columns: 1fr 110px;
+      gap: 8px;
     }}
     .radio-item {{
       border: 1px solid #323232;
@@ -1769,7 +1888,8 @@ def _render_alerts_page(
             <input id="personal_webhook_url" name="personal_webhook_url" type="url" value="{escape(personal_webhook)}" placeholder="https://discord.com/api/webhooks/..." />
           </div>
           <div>
-            <label>Personal Mention (optional)</label>
+            <label>Personal Ping for Timer Warnings (optional)</label>
+            <div class="muted" style="margin-bottom:6px;">Only the 30-minute "leaving reinforcement" warning pings. Attack, reinforce and kill alerts never do.</div>
             <div class="roles-grid">
               <label class="role-item">
                 <input type="radio" name="personal_mention_mode" value="{MENTION_NONE}" {"checked" if personal_mention_form["mode"] == MENTION_NONE else ""} />
@@ -1806,6 +1926,12 @@ def _render_alerts_page(
     </div>
 
     <div class="panel">
+      <h2>Personal Alert Filter</h2>
+      {personal_filter_note}
+      {personal_filter_html}
+    </div>
+
+    <div class="panel">
       <h2>Corporation Webhook</h2>
       <div class="muted">
         Scope status:
@@ -1816,6 +1942,12 @@ def _render_alerts_page(
         Your current corp roles: <strong>{escape(current_roles_display)}</strong>.
       </div>
       {corp_management_html}
+    </div>
+
+    <div class="panel">
+      <h2>Corporation Alert Filter</h2>
+      <div class="muted" style="margin-bottom:8px;">Applies to every pilot whose alerts go to the corporation webhook.</div>
+      {corp_filter_html}
     </div>
 
     <div class="links">

@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.auth.scopes import MAIL_SEND_SCOPE
 from app.config import get_settings
-from app.db.models import Character, Delivery, Notification
+from app.db.models import Character, CorpSetting, Delivery, Notification
 from app.db.session import SessionLocal
 from app.delivery.resolver import resolve_destination_with_debug
 from app.delivery.sender import (
@@ -20,11 +20,14 @@ from app.delivery.sender import (
     post_webhook_detailed,
 )
 from app.esi.client import (
+    fetch_killmail_system_id,
     refresh_access_token,
     resolve_planet_names,
     resolve_universe_names,
     send_mail,
 )
+from app.notifications.filtering import KILL_REPORT_TYPE
+from app.notifications.location_filter import StoredFilterError, evaluate, load_filter
 from app.notifications.parsing import parse_notification_text
 from app.security.crypto import decrypt_refresh_token, encrypt_refresh_token
 from app.services.backoff import compute_backoff_seconds
@@ -33,8 +36,11 @@ from app.services.delivery_policy import (
     notification_is_stale,
     notification_predates_monitoring_window,
 )
+from app.services.timer_alerts import send_due_summaries, send_due_warnings, sync_timers
+from app.services.universe_health import UniverseGate
 
 SENDER_BATCH_SIZE = 50
+UNIVERSE_HOLD_SECONDS = 300
 
 
 def _parse_scopes(scopes_blob: str | None) -> set[str]:
@@ -186,6 +192,199 @@ def _send_eve_mail_fallback(
     return True, None
 
 
+def _mark_filtered(delivery: Delivery, *, now: datetime, reason: str) -> None:
+    delivery.status = "filtered"
+    delivery.last_error = reason[:1000]
+    delivery.updated_at = now
+
+
+def _hold_for_universe(delivery: Delivery, *, now: datetime, reason: str) -> None:
+    """Keep the delivery pending without counting it as a failed send attempt."""
+    delivery.status = "pending"
+    delivery.next_attempt_at = now + timedelta(seconds=UNIVERSE_HOLD_SECONDS)
+    delivery.last_error = reason[:1000]
+    delivery.updated_at = now
+
+
+def _filter_for_destination(db, *, destination, character: Character) -> str:
+    """The filter belongs to wherever the alert is going; corp overrides personal."""
+    if destination is not None and destination.destination_key.startswith("corp:"):
+        corp_setting = db.get(CorpSetting, character.corporation_id)
+        return corp_setting.alert_filter if corp_setting is not None else ""
+    return character.alert_filter or ""
+
+
+def _notification_system_id(notification: Notification) -> int | None:
+    details = parse_notification_text(notification.raw_text or "")
+    try:
+        system_id = int(details.get("solarsystemID"))
+    except (TypeError, ValueError):
+        system_id = 0
+    if system_id > 0:
+        return system_id
+
+    if notification.type == KILL_REPORT_TYPE:
+        killmail_hash = str(details.get("killMailHash") or "").strip()
+        try:
+            killmail_id = int(details.get("killMailID"))
+        except (TypeError, ValueError):
+            return None
+        if not killmail_hash:
+            return None
+        try:
+            return fetch_killmail_system_id(killmail_id, killmail_hash)
+        except httpx.HTTPError as exc:
+            print("sender", f"notification_id={notification.notification_id}", f"killmail-lookup-error={exc}")
+    return None
+
+
+def _make_admin_notifier(db, *, settings, token_cache: dict[int, str]):
+    def notify(subject: str, body: str) -> tuple[bool, str | None]:
+        if not settings.admin_character_ids:
+            return False, "no ADMIN_CHARACTER_IDS configured"
+        admin = db.get(Character, settings.admin_character_ids[0])
+        if admin is None:
+            return False, "admin character has never logged in"
+        if MAIL_SEND_SCOPE not in _parse_scopes(admin.scopes):
+            return False, f"admin character is missing scope {MAIL_SEND_SCOPE}"
+        access_token, token_error = _get_access_token(character=admin, token_cache=token_cache)
+        if not access_token:
+            return False, token_error
+        try:
+            send_mail(
+                character_id=admin.character_id,
+                access_token=access_token,
+                recipient_character_id=admin.character_id,
+                subject=subject[:120],
+                body=body,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            return False, f"admin mail HTTP error: {exc}"
+        return True, None
+
+    return notify
+
+
+def _apply_location_filter(
+    db,
+    *,
+    delivery: Delivery,
+    notification: Notification,
+    character: Character,
+    destination,
+    universe_gate: UniverseGate,
+    now: datetime,
+) -> bool:
+    """Return True if the delivery should proceed to sending; otherwise it has been handled."""
+    try:
+        alert_filter = load_filter(_filter_for_destination(db, destination=destination, character=character))
+    except StoredFilterError as exc:
+        print("sender", f"delivery={delivery.id}", f"filter-error={exc}", "action=send_unfiltered")
+        return True
+    if not alert_filter.active:
+        return True
+
+    universe = universe_gate.get()
+    if universe is None:
+        _hold_for_universe(delivery, now=now, reason=universe_gate.unavailable_reason or "universe data unavailable")
+        print("sender", f"delivery={delivery.id}", "status=held", f"reason={delivery.last_error}")
+        return False
+
+    decision = evaluate(alert_filter, _notification_system_id(notification), universe)
+    if decision.send:
+        if decision.reason.startswith("location unknown"):
+            print("sender", f"delivery={delivery.id}", f"filter={decision.reason}")
+        return True
+
+    _mark_filtered(delivery, now=now, reason=decision.reason)
+    print(
+        "sender",
+        f"delivery={delivery.id}",
+        f"character={character.character_id}",
+        "status=filtered",
+        f"notification_id={notification.notification_id}",
+        f"reason={decision.reason}",
+    )
+    return False
+
+
+def _throttled_post(destination, payload: dict, *, settings, last_discord_send_at: dict[str, float]):
+    min_gap = max(settings.discord_min_seconds_per_destination, 0.0)
+    previous_send = last_discord_send_at.get(destination.destination_key)
+    if previous_send is not None and min_gap > 0:
+        wait_seconds = min_gap - (time.monotonic() - previous_send)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+    result = post_webhook_detailed(destination.webhook_url, payload)
+    if result.ok:
+        last_discord_send_at[destination.destination_key] = time.monotonic()
+    return result
+
+
+def _lookup_names(system_ids: set[int], planet_ids: set[int]) -> dict[int, str]:
+    names: dict[int, str] = {}
+    try:
+        if system_ids:
+            names.update(resolve_universe_names(list(system_ids)))
+        if planet_ids:
+            names.update(resolve_planet_names(list(planet_ids)))
+    except httpx.HTTPError as exc:
+        print("sender", f"timer-name-lookup-error={exc}")
+    return names
+
+
+def _run_timer_alerts(db, *, settings, token_cache: dict[int, str], last_discord_send_at: dict[str, float]) -> tuple[int, int]:
+    """Create timers from sent Reinforced alerts, then send due warnings and summaries."""
+
+    def post_discord(destination, payload):
+        return _throttled_post(
+            destination, payload, settings=settings, last_discord_send_at=last_discord_send_at
+        )
+
+    def send_mail_to_self(character: Character, subject: str, body: str) -> tuple[bool, str | None]:
+        if MAIL_SEND_SCOPE not in _parse_scopes(character.scopes):
+            return False, f"mail unavailable: missing scope {MAIL_SEND_SCOPE}"
+        access_token, token_error = _get_access_token(character=character, token_cache=token_cache)
+        if not access_token:
+            return False, token_error
+        try:
+            send_mail(
+                character_id=character.character_id,
+                access_token=access_token,
+                recipient_character_id=character.character_id,
+                subject=subject,
+                body=body,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            return False, f"mail HTTP error: {exc}"
+        return True, None
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    warnings_sent = summaries_sent = 0
+    try:
+        sync_timers(db, now=now)
+        warnings_sent = send_due_warnings(
+            db,
+            settings=settings,
+            now=now,
+            post_discord=post_discord,
+            send_mail=send_mail_to_self,
+            lookup_names=_lookup_names,
+        )
+        summaries_sent = send_due_summaries(
+            db,
+            settings=settings,
+            now=now,
+            post_discord=post_discord,
+            lookup_names=_lookup_names,
+        )
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        print("sender", f"timer-alerts-db-error={exc}")
+    return warnings_sent, summaries_sent
+
+
 def run_sender_once() -> None:
     """Process due deliveries in timestamp order."""
     settings = get_settings()
@@ -218,6 +417,15 @@ def run_sender_once() -> None:
         token_cache: dict[int, str] = {}
         last_discord_send_at: dict[str, float] = {}
         universe_name_lookup: dict[int, str] = {}
+        universe_gate = UniverseGate(
+            db,
+            data_dir=settings.universe_data_dir,
+            user_agent=settings.eve_user_agent,
+            now=now,
+            notify_admin=_make_admin_notifier(db, settings=settings, token_cache=token_cache),
+        )
+        filtered = 0
+        held = 0
 
         system_ids: set[int] = set()
         planet_ids: set[int] = set()
@@ -298,6 +506,26 @@ def run_sender_once() -> None:
                     else None
                 ),
             )
+            if not _apply_location_filter(
+                db,
+                delivery=delivery,
+                notification=notification,
+                character=character,
+                destination=destination,
+                universe_gate=universe_gate,
+                now=now,
+            ):
+                if delivery.status == "filtered":
+                    filtered += 1
+                else:
+                    held += 1
+                try:
+                    db.commit()
+                except SQLAlchemyError as exc:
+                    db.rollback()
+                    print("sender", f"delivery={delivery.id}", f"db-commit-error={exc}")
+                continue
+
             if destination is None:
                 print(
                     "sender",
@@ -320,9 +548,10 @@ def run_sender_once() -> None:
                     if wait_seconds > 0:
                         time.sleep(wait_seconds)
 
+                # Event alerts never ping; only timer warnings use the mention.
                 payload = build_discord_payload(
                     _notification_context(notification, character),
-                    mention_text=destination.mention_text,
+                    mention_text=None,
                     name_lookup=universe_name_lookup,
                 )
                 result = post_webhook_detailed(destination.webhook_url, payload)
@@ -411,6 +640,13 @@ def run_sender_once() -> None:
                 db.rollback()
                 print("sender", f"delivery={delivery.id}", f"db-commit-error={exc}")
 
+        warnings_sent, summaries_sent = _run_timer_alerts(
+            db,
+            settings=settings,
+            token_cache=token_cache,
+            last_discord_send_at=last_discord_send_at,
+        )
+
     print(
         "sender-summary",
         f"processed={processed}",
@@ -418,4 +654,8 @@ def run_sender_once() -> None:
         f"discord_sent={discord_sent}",
         f"mail_sent={mail_sent}",
         f"retried={retried}",
+        f"filtered={filtered}",
+        f"held={held}",
+        f"timer_warnings={warnings_sent}",
+        f"timer_summaries={summaries_sent}",
     )

@@ -1,12 +1,12 @@
 """Discord payload building and webhook send helpers."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 import re
 
 import httpx
 
-from app.notifications.parsing import parse_notification_text
+from app.notifications.parsing import parse_notification_text, reinforcement_exit_time
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -38,7 +38,22 @@ def _as_positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _build_event_summary(notification: dict, name_lookup: dict[int, str] | None = None) -> str:
+def _format_reinforcement_exit(exited: datetime, *, discord: bool) -> str:
+    eve_time = exited.strftime("%Y-%m-%d %H:%M")
+    line = f"Out of reinforcement: `{eve_time}` EVE"
+    if discord:
+        # Discord renders <t:unix:style> in each viewer's local time; keep it outside code spans.
+        unix = int(exited.replace(tzinfo=UTC).timestamp())
+        line = f"{line} · <t:{unix}:F> (<t:{unix}:R>)"
+    return line
+
+
+def _build_event_summary(
+    notification: dict,
+    name_lookup: dict[int, str] | None = None,
+    *,
+    discord: bool = True,
+) -> str:
     notif_type = str(notification.get("type", "MercenaryDenEvent"))
     character_name = str(notification.get("character_name", "Unknown Character"))
     timestamp = _format_timestamp(notification.get("timestamp"))
@@ -70,6 +85,10 @@ def _build_event_summary(notification: dict, name_lookup: dict[int, str] | None 
 
     if extra:
         summary = f"{summary}\n" + " | ".join(extra)
+
+    exited = reinforcement_exit_time(details)
+    if exited is not None:
+        summary = f"{summary}\n{_format_reinforcement_exit(exited, discord=discord)}"
     return summary
 
 
@@ -90,6 +109,76 @@ def build_discord_payload(
     return {"content": content}
 
 
+def _timer_place(timer: dict, name_lookup: dict[int, str] | None) -> tuple[str, str]:
+    lookup = name_lookup or {}
+    system_id = _as_positive_int(timer.get("solar_system_id"))
+    planet_id = _as_positive_int(timer.get("planet_id"))
+    system = lookup.get(system_id, str(system_id)) if system_id else "unknown system"
+    planet = lookup.get(planet_id, str(planet_id)) if planet_id else ""
+    return system, planet
+
+
+def build_timer_warning_payload(
+    timer: dict,
+    mention_text: str | None,
+    *,
+    name_lookup: dict[int, str] | None = None,
+) -> dict:
+    """The one alert that pings: a reinforced den is about to become vulnerable."""
+    system, planet = _timer_place(timer, name_lookup)
+    location = f"system `{system}`" + (f" | planet `{planet}`" if planet else "")
+    lines = []
+    if mention_text:
+        lines.append(mention_text.strip())
+    lines.append(
+        f"**Merc Den leaving reinforcement** for `{timer.get('character_name', 'Unknown Character')}`"
+    )
+    lines.append(location)
+    lines.append(_format_reinforcement_exit(timer["exits_at"], discord=True))
+    return {"content": "\n".join(lines)}
+
+
+def build_timer_warning_mail(timer: dict, subject_prefix: str, *, name_lookup: dict[int, str] | None = None) -> tuple[str, str]:
+    system, planet = _timer_place(timer, name_lookup)
+    subject = f"{subject_prefix}: Merc Den leaving reinforcement"
+    body_lines = [
+        f"A Merc Den for {timer.get('character_name', 'Unknown Character')} is about to leave reinforcement.",
+        "",
+        f"System: {system}",
+    ]
+    if planet:
+        body_lines.append(f"Planet: {planet}")
+    body_lines.append(_format_reinforcement_exit(timer["exits_at"], discord=False).replace("`", ""))
+    return subject[:120], "\n".join(body_lines)
+
+
+def build_timer_summary_payload(timers: list[dict], *, name_lookup: dict[int, str] | None = None) -> dict:
+    """Summary of upcoming reinforcement exits, soonest first. Never pings."""
+    header = f"**Upcoming Merc Den timers** ({len(timers)})"
+    lines = []
+    for timer in timers:
+        system, planet = _timer_place(timer, name_lookup)
+        exits_at = timer["exits_at"]
+        unix = int(exits_at.replace(tzinfo=UTC).timestamp())
+        where = f"{planet} (`{system}`)" if planet else f"`{system}`"
+        lines.append(
+            f"- <t:{unix}:R> · `{exits_at.strftime('%m-%d %H:%M')}` EVE · <t:{unix}:f> · "
+            f"{where} · {timer.get('character_name', 'Unknown Character')}"
+        )
+
+    content = header
+    shown = 0
+    for line in lines:
+        remaining = len(lines) - shown - 1
+        tail = f"\n…and {remaining} more" if remaining else ""
+        if len(content) + 1 + len(line) + len(tail) > 1900:
+            content += f"\n…and {len(lines) - shown} more"
+            break
+        content += "\n" + line
+        shown += 1
+    return {"content": content}
+
+
 def build_eve_mail_content(
     notification: dict,
     subject_prefix: str,
@@ -101,7 +190,7 @@ def build_eve_mail_content(
     character_name = str(notification.get("character_name", "Unknown Character"))
     timestamp = _format_timestamp(notification.get("timestamp"))
     notification_id = notification.get("notification_id")
-    summary = _build_event_summary(notification, name_lookup=name_lookup)
+    summary = _build_event_summary(notification, name_lookup=name_lookup, discord=False)
 
     subject = f"{subject_prefix}: {notif_type}"
     body_lines = [

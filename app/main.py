@@ -1,5 +1,6 @@
 """FastAPI entrypoint."""
 
+import threading
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from app.api.routes_telemetry import router as telemetry_router
 from app.config import get_settings
 from app.db.session import init_database
 from app.telemetry.events import ensure_local_install_id
+from app.universe.sde import UniverseUnavailable, ensure_universe_cache
 from app.web.routes import router as web_router
 
 
@@ -74,10 +76,21 @@ async def security_headers_middleware(
     return response
 
 
+def _prepare_universe_data() -> None:
+    """Download and cache the pinned SDE build if missing. The sender self-heals too."""
+    try:
+        path = ensure_universe_cache(settings.universe_data_dir, user_agent=settings.eve_user_agent)
+        print("universe", f"ready={path}", flush=True)
+    except UniverseUnavailable as exc:
+        print("universe", f"startup-build-failed={exc}", flush=True)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_database()
     ensure_local_install_id()
+    # Background thread: a ~100MB first download must not delay the web service.
+    threading.Thread(target=_prepare_universe_data, name="universe-prepare", daemon=True).start()
 
 
 @app.on_event("shutdown")

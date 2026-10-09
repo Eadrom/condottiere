@@ -48,6 +48,26 @@ def _parse_int_list(value: str | None) -> tuple[int, ...]:
     return tuple(parsed)
 
 
+def _parse_utc_times(value: str | None, default: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+    """Parse "HH:MM,HH:MM" into sorted (hour, minute) pairs; fall back to default if invalid."""
+    if not value or not value.strip():
+        return default
+    parsed = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            hour_text, minute_text = part.split(":")
+            hour, minute = int(hour_text), int(minute_text)
+        except ValueError:
+            return default
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            return default
+        parsed.add((hour, minute))
+    return tuple(sorted(parsed)) or default
+
+
 def _parse_optional_text(value: str | None) -> str:
     raw = (value or "").strip()
     if raw in {"TODO", "UPDATE_ME", "CHANGE_ME"}:
@@ -96,6 +116,12 @@ class Settings:
     # Optional hidden telemetry collector gate
     telemetry_primary_node: bool
 
+    # Pinned SDE universe cache (outside the repo; see app/universe/sde.py)
+    universe_data_dir: str
+
+    # Daily slots (UTC) for the upcoming reinforcement timer summary
+    timer_summary_times_utc: tuple[tuple[int, int], ...]
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings(
@@ -132,6 +158,15 @@ def get_settings() -> Settings:
         ).strip()
         or "Condottiere Alert",
         telemetry_primary_node=_parse_bool(os.getenv("TELEMETRY_PRIMARY_NODE"), False),
+        universe_data_dir=os.getenv("UNIVERSE_DATA_DIR", "").strip()
+        or os.path.join(
+            os.getenv("XDG_DATA_HOME", "").strip() or os.path.expanduser("~/.local/share"),
+            "condottiere",
+            "universe",
+        ),
+        timer_summary_times_utc=_parse_utc_times(
+            os.getenv("SUMMARY_TIMES_UTC"), ((11, 30), (23, 30))
+        ),
     )
 
 

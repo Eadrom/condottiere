@@ -196,6 +196,16 @@ Expected:
 - PostgreSQL listens on `127.0.0.1` only
 - public access goes through nginx only
 
+## Universe Data (location filters)
+
+Location filters need EVE map data. The SDE build is pinned in `app/universe/sde.py` and only
+changes in a Condottiere release. On web startup (and again whenever a filtered alert is waiting and the files have gone missing)
+the server downloads that exact build from CCP (~100MB, once), checks its sha256, and keeps a
+~660KB cache in `~/.local/share/condottiere/universe` (override with `UNIVERSE_DATA_DIR`).
+Look for `universe ready=...` in the web service log. If the data can't be rebuilt, filtered
+alerts are held and the first `ADMIN_CHARACTER_IDS` character gets one EVE mail per day (that
+character needs to be logged in with the mail scope).
+
 ## Update Process
 
 Run update as service user, then restart web from admin shell:

@@ -219,3 +219,22 @@ def resolve_planet_names(planet_ids: list[int]) -> dict[int, str]:
                 continue
             names[planet_id] = name
     return names
+
+
+def fetch_killmail_system_id(killmail_id: int, killmail_hash: str) -> int | None:
+    """Return the solar system of a killmail (public endpoint, no token needed)."""
+    settings = get_settings()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": settings.eve_user_agent,
+    }
+    params = {"datasource": settings.eve_esi_datasource}
+    url = f"{settings.eve_esi_base_url.rstrip('/')}/killmails/{int(killmail_id)}/{killmail_hash}/"
+
+    with httpx.Client(timeout=20.0) as client:
+        response = client.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    try:
+        return int(response.json()["solar_system_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
