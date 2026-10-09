@@ -20,7 +20,7 @@ from app.delivery.sender import (
     post_webhook_detailed,
 )
 from app.esi.client import (
-    fetch_killmail_system_id,
+    fetch_killmail_location,
     refresh_access_token,
     resolve_planet_names,
     resolve_universe_names,
@@ -50,7 +50,53 @@ def _parse_scopes(scopes_blob: str | None) -> set[str]:
     return {scope for scope in scopes_blob.split() if scope}
 
 
-def _notification_context(notification: Notification, character: Character) -> dict:
+KillLocations = dict[int, tuple[int | None, int | None]]
+
+
+def _effective_raw_text(notification: Notification, kill_locations: KillLocations | None = None) -> str:
+    """Notification text, plus the location looked up for den kill reports (which carry none)."""
+    raw_text = notification.raw_text or ""
+    system_id, planet_id = (kill_locations or {}).get(notification.notification_id, (None, None))
+    extra = []
+    if system_id:
+        extra.append(f"solarsystemID: {system_id}")
+    if planet_id:
+        extra.append(f"planetID: {planet_id}")
+    if not extra:
+        return raw_text
+    return raw_text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
+
+
+def _resolve_kill_locations(notifications: list[Notification], name_lookup: dict[int, str]) -> KillLocations:
+    """Look up system and planet for den kill reports, once per sender run."""
+    locations: KillLocations = {}
+    for notification in notifications:
+        if notification.type != KILL_REPORT_TYPE or notification.notification_id in locations:
+            continue
+        details = parse_notification_text(notification.raw_text or "")
+        if details.get("solarsystemID"):
+            continue
+        killmail_hash = str(details.get("killMailHash") or "").strip()
+        try:
+            killmail_id = int(details.get("killMailID"))
+        except (TypeError, ValueError):
+            continue
+        if not killmail_hash:
+            continue
+        try:
+            system_id, planet_id, planet_name = fetch_killmail_location(killmail_id, killmail_hash)
+        except httpx.HTTPError as exc:
+            print("sender", f"notification_id={notification.notification_id}", f"killmail-lookup-error={exc}")
+            continue
+        locations[notification.notification_id] = (system_id, planet_id)
+        if planet_id and planet_name:
+            name_lookup[planet_id] = planet_name
+    return locations
+
+
+def _notification_context(
+    notification: Notification, character: Character, kill_locations: KillLocations | None = None
+) -> dict:
     return {
         "character_id": character.character_id,
         "character_name": character.character_name,
@@ -58,12 +104,14 @@ def _notification_context(notification: Notification, character: Character) -> d
         "notification_id": notification.notification_id,
         "type": notification.type,
         "timestamp": notification.timestamp,
-        "raw_text": notification.raw_text,
+        "raw_text": _effective_raw_text(notification, kill_locations),
     }
 
 
-def _extract_name_lookup_ids(notification: Notification) -> tuple[set[int], set[int]]:
-    details = parse_notification_text(notification.raw_text or "")
+def _extract_name_lookup_ids(
+    notification: Notification, kill_locations: KillLocations | None = None
+) -> tuple[set[int], set[int]]:
+    details = parse_notification_text(_effective_raw_text(notification, kill_locations))
     system_ids: set[int] = set()
     planet_ids: set[int] = set()
 
@@ -159,6 +207,7 @@ def _send_eve_mail_fallback(
     notification: Notification,
     token_cache: dict[int, str],
     name_lookup: dict[int, str] | None = None,
+    kill_locations: KillLocations | None = None,
 ) -> tuple[bool, str | None]:
     scopes = _parse_scopes(character.scopes)
     if MAIL_SEND_SCOPE not in scopes:
@@ -172,7 +221,7 @@ def _send_eve_mail_fallback(
         return False, token_error or "mail fallback token error"
 
     settings = get_settings()
-    alert_data = _notification_context(notification, character)
+    alert_data = _notification_context(notification, character, kill_locations)
     subject, body = build_eve_mail_content(
         alert_data,
         settings.eve_mail_subject_prefix,
@@ -215,28 +264,13 @@ def _filter_for_destination(db, *, destination, character: Character) -> str:
     return character.alert_filter or ""
 
 
-def _notification_system_id(notification: Notification) -> int | None:
-    details = parse_notification_text(notification.raw_text or "")
+def _notification_system_id(notification: Notification, kill_locations: KillLocations | None = None) -> int | None:
+    details = parse_notification_text(_effective_raw_text(notification, kill_locations))
     try:
         system_id = int(details.get("solarsystemID"))
     except (TypeError, ValueError):
-        system_id = 0
-    if system_id > 0:
-        return system_id
-
-    if notification.type == KILL_REPORT_TYPE:
-        killmail_hash = str(details.get("killMailHash") or "").strip()
-        try:
-            killmail_id = int(details.get("killMailID"))
-        except (TypeError, ValueError):
-            return None
-        if not killmail_hash:
-            return None
-        try:
-            return fetch_killmail_system_id(killmail_id, killmail_hash)
-        except httpx.HTTPError as exc:
-            print("sender", f"notification_id={notification.notification_id}", f"killmail-lookup-error={exc}")
-    return None
+        return None
+    return system_id if system_id > 0 else None
 
 
 def _make_admin_notifier(db, *, settings, token_cache: dict[int, str]):
@@ -275,6 +309,7 @@ def _apply_location_filter(
     destination,
     universe_gate: UniverseGate,
     now: datetime,
+    kill_locations: KillLocations | None = None,
 ) -> bool:
     """Return True if the delivery should proceed to sending; otherwise it has been handled."""
     try:
@@ -291,7 +326,7 @@ def _apply_location_filter(
         print("sender", f"delivery={delivery.id}", "status=held", f"reason={delivery.last_error}")
         return False
 
-    decision = evaluate(alert_filter, _notification_system_id(notification), universe)
+    decision = evaluate(alert_filter, _notification_system_id(notification, kill_locations), universe)
     if decision.send:
         if decision.reason.startswith("location unknown"):
             print("sender", f"delivery={delivery.id}", f"filter={decision.reason}")
@@ -445,10 +480,13 @@ def run_sender_once() -> None:
         filtered = 0
         held = 0
 
+        kill_locations = _resolve_kill_locations(
+            [notification for _, notification, _ in rows], universe_name_lookup
+        )
         system_ids: set[int] = set()
         planet_ids: set[int] = set()
         for _, notification, _ in rows:
-            notif_system_ids, notif_planet_ids = _extract_name_lookup_ids(notification)
+            notif_system_ids, notif_planet_ids = _extract_name_lookup_ids(notification, kill_locations)
             system_ids.update(notif_system_ids)
             planet_ids.update(notif_planet_ids)
 
@@ -457,6 +495,7 @@ def run_sender_once() -> None:
                 universe_name_lookup.update(resolve_universe_names(list(system_ids)))
             except httpx.HTTPError as exc:
                 print("sender", f"universe-system-names-error={exc}")
+        planet_ids -= set(universe_name_lookup)
         if planet_ids:
             try:
                 universe_name_lookup.update(resolve_planet_names(list(planet_ids)))
@@ -532,6 +571,7 @@ def run_sender_once() -> None:
                 destination=destination,
                 universe_gate=universe_gate,
                 now=now,
+                kill_locations=kill_locations,
             ):
                 if delivery.status == "filtered":
                     filtered += 1
@@ -568,7 +608,7 @@ def run_sender_once() -> None:
 
                 # Event alerts never ping; only timer warnings use the mention.
                 payload = build_discord_payload(
-                    _notification_context(notification, character),
+                    _notification_context(notification, character, kill_locations),
                     mention_text=None,
                     name_lookup=universe_name_lookup,
                 )
@@ -624,6 +664,7 @@ def run_sender_once() -> None:
                         notification=notification,
                         token_cache=token_cache,
                         name_lookup=universe_name_lookup,
+                        kill_locations=kill_locations,
                     )
                     if ok:
                         _mark_sent(delivery, now)

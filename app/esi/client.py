@@ -221,20 +221,70 @@ def resolve_planet_names(planet_ids: list[int]) -> dict[int, str]:
     return names
 
 
-def fetch_killmail_system_id(killmail_id: int, killmail_hash: str) -> int | None:
-    """Return the solar system of a killmail (public endpoint, no token needed)."""
+def nearest_planet(position: dict, planets: list[dict]) -> dict | None:
+    """Pick the planet closest to a position (all in the same system's coordinates)."""
+    try:
+        x, y, z = float(position["x"]), float(position["y"]), float(position["z"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    best = None
+    best_distance = None
+    for planet in planets:
+        try:
+            px, py, pz = (float(planet["position"][axis]) for axis in ("x", "y", "z"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        distance = (x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2
+        if best_distance is None or distance < best_distance:
+            best, best_distance = planet, distance
+    return best
+
+
+def fetch_killmail_location(killmail_id: int, killmail_hash: str) -> tuple[int | None, int | None, str | None]:
+    """Return (system_id, planet_id, planet_name) for a killmail (public endpoints, no token).
+
+    Killmails carry the system and the victim's position but no planet. A Merc Den sits
+    within ~20,000 km of its planet while other planets are millions of km away, so the
+    nearest planet identifies it.
+    """
     settings = get_settings()
     headers = {
         "Accept": "application/json",
         "User-Agent": settings.eve_user_agent,
     }
     params = {"datasource": settings.eve_esi_datasource}
-    url = f"{settings.eve_esi_base_url.rstrip('/')}/killmails/{int(killmail_id)}/{killmail_hash}/"
+    base = settings.eve_esi_base_url.rstrip("/")
 
     with httpx.Client(timeout=20.0) as client:
-        response = client.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    try:
-        return int(response.json()["solar_system_id"])
-    except (KeyError, TypeError, ValueError):
-        return None
+        response = client.get(
+            f"{base}/killmails/{int(killmail_id)}/{killmail_hash}/", headers=headers, params=params
+        )
+        response.raise_for_status()
+        killmail = response.json()
+        try:
+            system_id = int(killmail["solar_system_id"])
+        except (KeyError, TypeError, ValueError):
+            return None, None, None
+        position = (killmail.get("victim") or {}).get("position")
+        if not position:
+            return system_id, None, None
+
+        response = client.get(f"{base}/universe/systems/{system_id}/", headers=headers, params=params)
+        response.raise_for_status()
+        planets = []
+        for entry in response.json().get("planets", []) or []:
+            planet_id = entry.get("planet_id")
+            if not planet_id:
+                continue
+            planet_response = client.get(
+                f"{base}/universe/planets/{int(planet_id)}/", headers=headers, params=params
+            )
+            if planet_response.status_code == 404:
+                continue
+            planet_response.raise_for_status()
+            planets.append(planet_response.json())
+
+    planet = nearest_planet(position, planets)
+    if planet is None:
+        return system_id, None, None
+    return system_id, int(planet["planet_id"]), str(planet.get("name") or "").strip() or None

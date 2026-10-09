@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import io
 import json
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -72,8 +73,8 @@ class Harness:
         )
         monkeypatch.setattr(
             sender_worker,
-            "fetch_killmail_system_id",
-            lambda killmail_id, killmail_hash: self.killmail_systems.get(killmail_id),
+            "fetch_killmail_location",
+            lambda killmail_id, killmail_hash: (self.killmail_systems.get(killmail_id), None, None),
         )
         self.now = datetime.now(UTC).replace(tzinfo=None)
         self._next_notification = 1000
@@ -311,3 +312,24 @@ def test_build_errors_hold_alerts_without_crashing(h, monkeypatch, error):
     assert h.delivery(unfiltered).status == "sent"
     busy = isinstance(error, sde.UniverseBusy)
     assert h.mails == ([] if busy else [(1, "Condottiere: universe data unavailable")])
+
+
+def test_kill_post_shows_system_and_planet(h, monkeypatch):
+    monkeypatch.setattr(
+        sender_worker,
+        "fetch_killmail_location",
+        lambda killmail_id, killmail_hash: (A1, 40000001, "A1 I") if killmail_id == 111 else (_ for _ in ()).throw(httpx.ConnectError("esi down")),
+    )
+    monkeypatch.setattr(sender_worker, "resolve_universe_names", lambda ids: {A1: "A1"})
+    h.add_character(8, personal_hook=PERSONAL_HOOK)
+    text = "killMailHash: abc\nkillMailID: {}\nvictimShipTypeID: 85230\n"
+    found = h.queue(8, text.format(111), notif_type="KillReportVictim")
+    lookup_fails = h.queue(8, text.format(222), notif_type="KillReportVictim")
+
+    sender_worker.run_sender_once()
+
+    posts = [content for _, content in h.posts]
+    assert len(posts) == 2
+    assert "system `A1` | planet `A1 I`" in posts[0]
+    assert "KillReportVictim" in posts[1] and "system" not in posts[1]  # sent anyway, just without location
+    assert h.delivery(found).status == h.delivery(lookup_fails).status == "sent"

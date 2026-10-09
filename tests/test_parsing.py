@@ -21,3 +21,17 @@ def test_parse_handles_empty_or_invalid_lines():
     raw_text = "foo: bar\nthis is not valid\n- ignored\n nested: ignored\n"
     parsed = parse_notification_text(raw_text)
     assert parsed["foo"] == "bar"
+
+
+def test_nearest_planet_picks_the_closest():
+    from app.esi.client import nearest_planet
+
+    planets = [
+        {"planet_id": 1, "position": {"x": 0, "y": 0, "z": 0}},
+        {"planet_id": 2, "position": {"x": 5e11, "y": 0, "z": 0}},
+        {"planet_id": 3, "position": {"x": -2e10, "y": 1e9, "z": 0}},
+    ]
+    assert nearest_planet({"x": -2.0001e10, "y": 1e9, "z": 1e7}, planets)["planet_id"] == 3
+    assert nearest_planet({"x": 1, "y": 1, "z": 1}, planets)["planet_id"] == 1
+    assert nearest_planet({}, planets) is None
+    assert nearest_planet({"x": 0, "y": 0, "z": 0}, []) is None
